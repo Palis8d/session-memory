@@ -1,5 +1,7 @@
 # Session Memory
 
+[![tests](https://github.com/Palis8d/session-memory/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Palis8d/session-memory/actions/workflows/tests.yml)
+
 Claude Code and Codex start each new session without your earlier ones. smem gives both one shared memory of every past session (what you asked, what they answered, which files changed, when) and a skill to search it, so they look things up instead of asking you. Runs on your computer, and keeps sessions past Claude Code's 30-day deletion.
 
 ## Without smem, and with it
