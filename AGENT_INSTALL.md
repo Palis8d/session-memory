@@ -74,7 +74,7 @@ Then run:
 
 ```bash
 smem stats
-smem recent --days 30
+smem catchup --days 7 --max-chars 3000
 smem search "WORDS"      # two or three distinctive words from the user's recent work
 ```
 
@@ -82,7 +82,7 @@ GREEN means all is well, and a fresh install should be GREEN. A YELLOW line is a
 
 ## 6. Report to the user (three sentences)
 
-Say what is installed, how many sessions are in memory and from what date, and the refresh mode. Tell them they can now ask Claude Code or Codex about past work in their own words. New sessions pick up the skill.
+Say what is installed, how many sessions are in memory and from what date, and the refresh mode. Tell them they can now ask Claude Code or Codex about past work in their own words, for example "what did we work on this week, and what's still unfinished?" New sessions pick up the skill.
 
 If the user has Claude Code, also tell them: Claude Code deletes its own session logs after 30 days by default. The memory keeps what their `--keep` answer says, but it stores only requests and answers, not the full logs. If they want the full logs kept too, offer to raise `cleanupPeriodDays` in `~/.claude/settings.json` (for example to 36500), and change it only if they say yes.
 

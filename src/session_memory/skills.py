@@ -17,7 +17,8 @@ MARKER = ".installed-by-smem"
 AGENTS = ("claude", "codex")
 LABELS = {"claude": "Claude Code", "codex": "Codex"}
 TEMPLATE = os.path.join(store.PACKAGE_DIR, "skill_templates", "SKILL.md")
-READ_COMMANDS = ("search", "session", "recent", "project", "files", "goals", "links", "stats", "sql", "schema")
+READ_COMMANDS = ("search", "session", "recent", "project", "files", "goals", "links", "stats", "sql", "schema",
+                 "catchup", "brief", "timeline", "handoff", "decisions")
 # Health checks run without asking only in their read-only forms (`--ack` writes and silences a warning).
 READ_EXACT = ("health", "health --fast", "health --json", "health --selftest")
 

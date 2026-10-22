@@ -8,6 +8,8 @@ Claude Code and Codex start each new session without your earlier ones. smem giv
 | --- | --- | --- |
 | **A new session** | The assistant starts without your earlier sessions, so you explain again what happened. | The assistant looks up what happened and tells you. |
 | **Finding one old decision** | Not knowing which session holds it, the assistant would have to read through old logs. A typical session is tens to hundreds of thousands of tokens, a long one millions, and the whole history here about 12 billion. In practice it can't, so it asks you. | One search across every session takes under a tenth of a second and returns a short list of dated matches: a few hundred to about 1,300 tokens in the searches measured. The assistant then opens only the session it needs. |
+| **"What's still unfinished?"** | The assistant would have to read many sessions and guess. | `smem catchup` lists, by day and project, the plan steps not done, requests left unanswered or cancelled, Codex goals not marked complete, and next steps left in final answers. They're leads from the record, for you to judge. |
+| **Picking work back up** | You find the old session and explain it again. | `smem handoff` gives a fresh session the goal, where it stands, what's open and the files involved, plus the command that reopens the original. |
 | **Claude Code and Codex** | Each sees only its own sessions. | Each finds the other's work too. |
 | **Claude Code sessions older than 30 days** | Deleted by Claude Code's default cleanup, for good. | Kept in the memory once smem has read them, and still searchable, unless you choose otherwise. |
 | **The whole history** | About 46 GB of raw logs (21.5 GB on disk, since Codex keeps older ones compressed). | A 0.74 GB memory file, holding 184 MB of text. |
@@ -82,6 +84,8 @@ smem health --selftest      # the checks catch 5 kinds of breakage in built-in s
 smem setup --dry-run        # every change setup would make, without making it
 ```
 
+In a copy of this repository, `python3 -I tests/test_search_quality.py` prints the search-quality scores.
+
 And in a copy of this repository, this prints nothing, because no file imports a network library:
 
 ```bash
@@ -95,9 +99,11 @@ The only other programs smem starts are `launchctl` or `systemctl` (for auto ref
 - **A fresh install by an AI agent** that knew nothing about the project, in a clean throwaway home, following only this README and [AGENT_INSTALL.md](AGENT_INSTALL.md). It then used smem to answer questions about sample history.
 - **Two separate AI reviews**, one for correctness and one for privacy and security. Each finding was reproduced before it was fixed.
 - **Secret redaction** is tested against 124 realistic fake secrets, and 87 ordinary snippets that must stay unchanged.
-- **Every key safety rule broken on purpose**, one at a time, to confirm a test notices. All 21 breaks are caught; rerun them with `python3 -I tests/break_on_purpose.py` (a few minutes).
+- **Search quality, measured.** Twenty labelled questions over a realistic sample history, including the traps that hurt real searches: the asking session, sessions that recalled others, and a long session that mentions everything in passing. The right session comes first for all twenty (mean reciprocal rank 1.0), against 0.9 for plain relevance ranking. Rerun it with `python3 -I tests/test_search_quality.py`.
+- **Random and broken input.** The secret redactor, both log readers and search are fed thousands of random and malformed inputs; none may crash, stall, or let a planted secret through. This found, and now guards against, log records of an unexpected shape.
+- **Every key safety rule broken on purpose**, one at a time, to confirm a test notices. All 33 breaks are caught; rerun them with `python3 -I tests/break_on_purpose.py` (a few minutes).
 - **A real history of more than 6,000 Claude Code and Codex sessions**, read-only, into a throwaway folder.
-- **68 automated tests** on Python 3.11 to 3.14. In daily use, `smem health` checks that the memory is current, that every log on disk is in it, that counts match Codex's own index, and that the log formats haven't changed; `--selftest` shows those checks catching five kinds of breakage (four log-format changes, and logs vanishing from disk) and staying quiet in two normal situations.
+- **97 automated tests**, run on Python 3.11 to 3.14 on macOS and Linux for every push. One of them checks that the numbers, commands and options in these documents match the code. In daily use, `smem health` checks that the memory is current, that every log on disk is in it, that counts match Codex's own index, and that the log formats haven't changed; `--selftest` shows those checks catching five kinds of breakage (four log-format changes, and logs vanishing from disk) and staying quiet in two normal situations.
 
 [SECURITY.md](SECURITY.md) lists each safety promise with the test that proves it, and what smem does and doesn't protect against.
 
@@ -106,12 +112,17 @@ The only other programs smem starts are `launchctl` or `systemctl` (for auto ref
 Ask your assistant in your own words. Or run it yourself:
 
 ```bash
-smem search "login page"      # words from any request or answer
-smem recent                   # what you worked on in the last few days
-smem session 7f3a             # one session, by id or name
+smem catchup --days 10        # what happened and what's still open, by day and project
+smem search login page        # one result per session, best first, with its other matching turns
+smem session 7f3a --around 12 # turn 12 of a session and the turns around it, not the whole thing
+smem brief 7f3a 9c01          # a few lines per session: asked, result, open, files
+smem handoff 7f3a             # a resume packet for picking a session up in a fresh one
+smem timeline myapp           # a project's sessions in date order, both assistants
+smem decisions myapp          # sentences that read like decisions, as leads to check
 smem files config.toml        # which sessions changed a file
-smem project myapp            # one project's sessions
 ```
+
+Search leaves out the session you're asking from (it always matches its own words), and ranks sessions that only recalled other sessions below the originals. When nothing has every word, it says so and shows sessions with at least half of them.
 
 `smem --help` lists every command.
 

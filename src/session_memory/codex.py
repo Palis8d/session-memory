@@ -16,7 +16,7 @@ from collections import Counter
 CODEX_HOME = os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")  # see config.codex_home
 EXTRA_LOG_DIRS = []  # extra folders under CODEX_HOME holding rollout logs (settings: sources.codex_extra_log_dirs)
 LOG_DIRS = ("sessions", "archived_sessions")  # where Codex itself keeps rollout logs
-ADAPTER_VERSION = 9  # bump when parsing changes so `smem update` re-reads every Codex log
+ADAPTER_VERSION = 10  # bump when parsing changes so `smem update` re-reads every Codex log
 
 # Every record type seen in a broad sample of real logs. Anything else is reported as unknown,
 # which is how `smem health` notices a format change on the day it happens.
@@ -35,6 +35,8 @@ EXEC_FUNCTIONS = {"exec_command", "shell", "local_shell"}
 
 AMBIENT = ("<environment_context", "<in-app-browser-context", "# AGENTS.md", "<user_instructions",
            "<turn_aborted", "<permissions", "<skills_instructions", "<system-reminder", "<user_shell_command")
+# A command that runs smem itself (same rule as the Claude adapter).
+RECALL_RE = re.compile(r"(?<![\w/.-])(smem|session_memory)(?![\w-])")
 PATCH_FILE_RE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+)$", re.M)
 EXEC_LITERAL_RE = re.compile(r"tools\.exec_command\s*\(")
 ROLLOUT_RE = re.compile(r"rollout-[0-9T:-]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
@@ -247,6 +249,11 @@ def _new_turn(ts):
             "mcp": 0, "aborted": False, "rewound": False}
 
 
+def _shape(record):
+    """Field names of an unrecognised record, never its content: enough to update the adapter."""
+    return ",".join(sorted(map(str, record))) if isinstance(record, dict) else type(record).__name__
+
+
 def _patch_files(text, turn):
     for m in PATCH_FILE_RE.finditer(str(text or "")):
         turn["files"].setdefault(m.group(2).strip(), m.group(1).lower() + " (attempted)")
@@ -272,6 +279,7 @@ def parse_thread(paths):
     command_signals = message_signals = 0
     reads = Counter()  # user_records, user_read, agent_records, agent_read
     meta, inherited = {}, None
+    shapes, plan = {}, None
 
     read_digests = {}  # ordinal -> digests of records read under it (to skip exact duplicates)
     resume_at = [None] * len(paths)  # per segment: its header's ordinal (where Codex resumed from)
@@ -281,138 +289,164 @@ def parse_thread(paths):
         with open_lines(path) as fh:
             for line in fh:
                 try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    errors += 1
-                    continue
-                if not isinstance(d, dict):
-                    continue
-                typ, p, o = d.get("type"), d.get("payload"), d.get("ordinal")
-                if isinstance(o, int) and len(paths) > 1 and typ != "session_meta":
-                    # No real log has repeated a record (checked on all multi-segment threads), but if a
-                    # segment ever does, an exact copy must not be counted twice.
-                    digest = hashlib.blake2b(json.dumps(d, sort_keys=True).encode(), digest_size=8).digest()
-                    seen = read_digests.setdefault(o, set())
-                    if digest in seen:
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        errors += 1
                         continue
-                    seen.add(digest)
-                    adds_new[i] = True
-                if typ == "session_meta":
-                    if isinstance(o, int) and resume_at[i] is None:
-                        resume_at[i] = o
-                    if not meta and isinstance(p, dict):
-                        kind, parent, role = helper_info(p.get("source"))
-                        meta = {"id": p.get("id"), "forked_from_id": p.get("forked_from_id"),
-                                "parent_thread_id": p.get("parent_thread_id") or parent, "kind": kind,
-                                "helper_role": role, "cwd": p.get("cwd"), "timestamp": p.get("timestamp")}
-                    continue
-                if typ not in KNOWN_TOP:
-                    unknown[f"top:{typ}"] += 1
-                if not isinstance(p, dict):
-                    continue
-                pt = p.get("type")
-                if typ == "compacted":
-                    if inherited is None:
-                        for m in p.get("replacement_history") or []:
-                            if isinstance(m, dict) and m.get("role") == "user":
-                                txt = _text(m.get("content"), user=True)
-                                if txt:
-                                    inherited = txt
-                                    break
-                    continue
-                if typ == "event_msg" and pt == "task_started":
-                    cur = _new_turn(d.get("timestamp"))
-                    cur["seg"], cur["ordinal"] = i, o
-                    turns.append(cur)
-                    continue
-                if typ not in ("event_msg", "response_item"):
-                    continue
-                if cur is None:
-                    cur = _new_turn(d.get("timestamp"))
-                    turns.append(cur)
-                if typ == "event_msg":
-                    if pt not in KNOWN_EVENT:
-                        unknown[f"event:{pt}"] += 1
-                    if pt == "task_complete":
-                        if p.get("last_agent_message"):
-                            cur["final"] = p["last_agent_message"]
-                            message_signals += 1
-                    elif pt == "turn_aborted":
-                        cur["aborted"] = True
-                    elif pt == "user_message":
-                        message_signals += 1
-                        reads["user_records"] += 1
-                        msg = p.get("message")
-                        if isinstance(msg, str):
-                            reads["user_read"] += 1
-                            if msg.strip() and not msg.lstrip().startswith(AMBIENT):
-                                cur["users"].append(("legacy", msg.strip()))
-                    elif pt == "agent_message":
-                        message_signals += 1
-                        reads["agent_records"] += 1
-                        if isinstance(p.get("message"), str):
-                            reads["agent_read"] += 1
-                            if p["message"].strip():
-                                cur["agents"].append(("legacy", p["message"].strip()))
-                    elif pt == "item_completed":
-                        it = p.get("item") or {}
-                        k = it.get("type")
-                        if k not in KNOWN_ITEM:
-                            unknown[f"item:{k}"] += 1
-                        if k == "UserMessage":
+                    if not isinstance(d, dict):
+                        continue
+                    typ, p, o = d.get("type"), d.get("payload"), d.get("ordinal")
+                    typ = typ if isinstance(typ, str) else f"<{type(typ).__name__}>"
+                    if not isinstance(d.get("timestamp"), str):
+                        d["timestamp"] = None
+                    if isinstance(o, int) and len(paths) > 1 and typ != "session_meta":
+                        # No real log has repeated a record (checked on all multi-segment threads), but if a
+                        # segment ever does, an exact copy must not be counted twice.
+                        digest = hashlib.blake2b(json.dumps(d, sort_keys=True).encode(), digest_size=8).digest()
+                        seen = read_digests.setdefault(o, set())
+                        if digest in seen:
+                            continue
+                        seen.add(digest)
+                        adds_new[i] = True
+                    if typ == "session_meta":
+                        if isinstance(o, int) and resume_at[i] is None:
+                            resume_at[i] = o
+                        if not meta and isinstance(p, dict):
+                            kind, parent, role = helper_info(p.get("source"))
+                            meta = {"id": p.get("id"), "forked_from_id": p.get("forked_from_id"),
+                                    "parent_thread_id": p.get("parent_thread_id") or parent, "kind": kind,
+                                    "helper_role": role, "cwd": p.get("cwd"), "timestamp": p.get("timestamp")}
+                        continue
+                    if typ not in KNOWN_TOP:
+                        unknown[f"top:{typ}"] += 1
+                        shapes.setdefault(f"top:{typ}", _shape(d))
+                    if not isinstance(p, dict):
+                        continue
+                    pt = p.get("type")
+                    pt = pt if isinstance(pt, str) or pt is None else f"<{type(pt).__name__}>"
+                    if typ == "compacted":
+                        if inherited is None:
+                            for m in p.get("replacement_history") or []:
+                                if isinstance(m, dict) and m.get("role") == "user":
+                                    txt = _text(m.get("content"), user=True)
+                                    if txt:
+                                        inherited = txt
+                                        break
+                        continue
+                    if typ == "event_msg" and pt == "task_started":
+                        cur = _new_turn(d.get("timestamp"))
+                        cur["seg"], cur["ordinal"] = i, o
+                        turns.append(cur)
+                        continue
+                    if typ not in ("event_msg", "response_item"):
+                        continue
+                    if cur is None:
+                        cur = _new_turn(d.get("timestamp"))
+                        turns.append(cur)
+                    if typ == "event_msg":
+                        if pt not in KNOWN_EVENT:
+                            unknown[f"event:{pt}"] += 1
+                            shapes.setdefault(f"event:{pt}", _shape(p))
+                        if pt == "task_complete":
+                            if p.get("last_agent_message"):
+                                cur["final"] = p["last_agent_message"]
+                                message_signals += 1
+                        elif pt == "turn_aborted":
+                            cur["aborted"] = True
+                        elif pt == "user_message":
                             message_signals += 1
                             reads["user_records"] += 1
-                            if _has_text_field(it.get("content")):
+                            msg = p.get("message")
+                            if isinstance(msg, str):
                                 reads["user_read"] += 1
-                            txt = _text(it.get("content"), user=True)
-                            if txt:
-                                cur["users"].append(("item", txt))
-                        elif k == "AgentMessage":
+                                if msg.strip() and not msg.lstrip().startswith(AMBIENT):
+                                    cur["users"].append(("legacy", msg.strip()))
+                        elif pt == "agent_message":
                             message_signals += 1
                             reads["agent_records"] += 1
-                            if _has_text_field(it.get("content")):
+                            if isinstance(p.get("message"), str):
                                 reads["agent_read"] += 1
-                            txt = _text(it.get("content"))
-                            if txt:
-                                cur["agents"].append(("item", txt))
-                                if it.get("phase") == "final_answer":
-                                    cur["final"] = txt
-                        elif k == "CommandExecution":
+                                if p["message"].strip():
+                                    cur["agents"].append(("legacy", p["message"].strip()))
+                        elif pt == "item_completed":
+                            it = p.get("item") or {}
+                            k = it.get("type")
+                            k = k if isinstance(k, str) or k is None else f"<{type(k).__name__}>"
+                            if k not in KNOWN_ITEM:
+                                unknown[f"item:{k}"] += 1
+                                shapes.setdefault(f"item:{k}", _shape(it))
+                            if k == "UserMessage":
+                                message_signals += 1
+                                reads["user_records"] += 1
+                                if _has_text_field(it.get("content")):
+                                    reads["user_read"] += 1
+                                txt = _text(it.get("content"), user=True)
+                                if txt:
+                                    cur["users"].append(("item", txt))
+                            elif k == "AgentMessage":
+                                message_signals += 1
+                                reads["agent_records"] += 1
+                                if _has_text_field(it.get("content")):
+                                    reads["agent_read"] += 1
+                                txt = _text(it.get("content"))
+                                if txt:
+                                    cur["agents"].append(("item", txt))
+                                    if it.get("phase") == "final_answer":
+                                        cur["final"] = txt
+                            elif k == "CommandExecution":
+                                command_signals += 1
+                                cur["native_cmds"] += 1
+                                if RECALL_RE.search(" ".join(map(str, it.get("command") or []))):
+                                    cur["recalls"] = 1
+                            elif k == "FileChange":
+                                if it.get("status") in (None, "completed", "applied"):
+                                    for fp, ch in (it.get("changes") or {}).items():
+                                        cur["files"][fp] = (ch or {}).get("type", "change")
+                            elif k == "McpToolCall":
+                                mcp += 1
+                                cur["mcp"] += 1
+                            elif k == "SubAgentActivity" and it.get("kind") == "started":
+                                helpers += 1
+                        continue
+                    # response_item
+                    if pt not in KNOWN_RESPONSE:
+                        unknown[f"response:{pt}"] += 1
+                        shapes.setdefault(f"response:{pt}", _shape(p))
+                    if pt in ("function_call", "custom_tool_call"):
+                        name = p.get("name") or "?"
+                        tools[name] += 1
+                        ts = d.get("timestamp")
+                        if ts and (name not in tool_first or ts < tool_first[name]):
+                            tool_first[name] = ts
+                        body = p.get("arguments") if pt == "function_call" else p.get("input")
+                        if name in EXEC_FUNCTIONS:
                             command_signals += 1
-                            cur["native_cmds"] += 1
-                        elif k == "FileChange":
-                            if it.get("status") in (None, "completed", "applied"):
-                                for fp, ch in (it.get("changes") or {}).items():
-                                    cur["files"][fp] = (ch or {}).get("type", "change")
-                        elif k == "McpToolCall":
-                            mcp += 1
-                            cur["mcp"] += 1
-                        elif k == "SubAgentActivity" and it.get("kind") == "started":
-                            helpers += 1
-                    continue
-                # response_item
-                if pt not in KNOWN_RESPONSE:
-                    unknown[f"response:{pt}"] += 1
-                if pt in ("function_call", "custom_tool_call"):
-                    name = p.get("name") or "?"
-                    tools[name] += 1
-                    ts = d.get("timestamp")
-                    if ts and (name not in tool_first or ts < tool_first[name]):
-                        tool_first[name] = ts
-                    body = p.get("arguments") if pt == "function_call" else p.get("input")
-                    if name in EXEC_FUNCTIONS:
-                        command_signals += 1
-                        cur["fallback_cmds"] += 1
-                    elif name == "exec" and pt == "custom_tool_call":
-                        n = len(EXEC_LITERAL_RE.findall(str(body or "")))
-                        command_signals += n
-                        cur["fallback_cmds"] += n
-                    elif name == "apply_patch":
-                        _patch_files(body, cur)
-                elif pt == "message" and p.get("role") == "user":
-                    txt = _text(p.get("content"), user=True)
-                    if txt:
-                        cur["resp_user"].append(txt)
+                            cur["fallback_cmds"] += 1
+                            if RECALL_RE.search(str(body or "")):
+                                cur["recalls"] = 1
+                        elif name == "update_plan":  # Codex sends the whole plan each time, with an explanation
+                            try:
+                                args = json.loads(body) if isinstance(body, str) else (body or {})
+                            except json.JSONDecodeError:
+                                args = {}
+                            if isinstance(args, dict) and isinstance(args.get("plan"), list):
+                                plan = {"items": [{"text": s.get("step") or s.get("content") or "",
+                                                   "status": s.get("status") or "pending"}
+                                                  for s in args["plan"] if isinstance(s, dict)],
+                                        "note": args.get("explanation") or None, "at": d.get("timestamp")}
+                        elif name == "exec" and pt == "custom_tool_call":
+                            n = len(EXEC_LITERAL_RE.findall(str(body or "")))
+                            command_signals += n
+                            cur["fallback_cmds"] += n
+                        elif name == "apply_patch":
+                            _patch_files(body, cur)
+                    elif pt == "message" and p.get("role") == "user":
+                        txt = _text(p.get("content"), user=True)
+                        if txt:
+                            cur["resp_user"].append(txt)
+                except (TypeError, AttributeError, KeyError, ValueError, IndexError):
+                    errors += 1  # a record of an unexpected shape: counted (health reports it) and skipped, the rest is still read
 
     # A turn was rewound past if a later segment resumed (its header ordinal) at or before the point
     # where the turn started, and that segment added new records. A segment that only repeats earlier
@@ -444,6 +478,7 @@ def parse_thread(paths):
         request = "\n\n".join(parts) or None
         out_turns.append({"started_at": t["started_at"], "request": request, "answer": answer,
                           "commands": cmds, "estimated": est, "mcp": t["mcp"], "aborted": int(t["aborted"]),
+                          "recalls": t.get("recalls", 0),
                           "rewound": int(t["rewound"]),
                           "files": sorted(t["files"]),
                           # In-memory only (never stored: it would let short redacted secrets be guessed
@@ -452,7 +487,8 @@ def parse_thread(paths):
                           "raw_hash": hashlib.sha256(f"{request}\x00{answer}".encode("utf-8", "replace")).hexdigest()
                           if (request or answer) else None})
     return {
-        "meta": meta, "turns": out_turns, "files": files, "unknown_types": dict(unknown),
+        "meta": meta, "turns": out_turns, "files": files, "unknown_types": dict(unknown), "unknown_shapes": shapes,
+        "plan": plan,
         "parse_errors": errors, "command_count": commands, "commands_estimated": estimated,
         "file_change_count": len(files), "mcp_count": mcp, "helper_count": helpers,
         "inherited_context": inherited, "command_signals": command_signals,

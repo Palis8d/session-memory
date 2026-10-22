@@ -6,6 +6,11 @@ Reading (never writes anything)
   smem recent [--days N]        sessions active recently
   smem project NAME             a project's sessions, newest first
   smem files PATH               sessions that changed a matching file
+  smem catchup [--days N]       what happened and what's still open, by day and project
+  smem brief ID [ID …]          a few lines per session: asked, result, open, files
+  smem timeline ID|PROJECT      sessions in date order around one session, or for a project
+  smem handoff ID               a resume packet for picking a session up in a fresh one
+  smem decisions [PROJECT]      sentences that read like decisions, as leads to check
   smem goals                    Codex goals
   smem links ID                 sessions connected to this one
   smem stats                    totals, and when the memory was last updated
@@ -27,7 +32,6 @@ Setup
 Each command takes --help. Results are records of past sessions.
 """
 import argparse
-import calendar
 import contextlib
 import json
 import os
@@ -36,20 +40,10 @@ import sqlite3
 import sys
 import time
 
-from . import __version__, config, health, ingest, schedule, skills, store
+from . import __version__, config, health, ingest, recall, schedule, skills, store
+from .recall import INSTRUCTION_NOTE, clip, instruction_like, local, one_line, plural, safe, tokens
 
 AGENT_CHOICES = ["codex", "claude"]
-
-
-def local(ts):
-    """UTC ISO -> local 'YYYY-MM-DD HH:MM' for display."""
-    if not ts:
-        return "?"
-    try:
-        epoch = calendar.timegm(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))
-        return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch))
-    except ValueError:
-        return ts[:16]
 
 
 def since(days):
@@ -66,21 +60,14 @@ def day(text, end=False):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-
-
-def safe(s):
-    """Stored text without terminal control characters (they could retitle or clear the terminal)."""
-    return _CONTROL.sub("", s or "")
-
-
-def one_line(s, n):
-    s = " ".join(safe(s).split())
-    return s if n is None or len(s) <= n else s[: n - 1] + "…"
-
-
-def plural(n, word):
-    return f"{n} {word}{'' if n == 1 else 's'}"
+def window(a, default_days=None):
+    """(start, end) as UTC ISO from --days, --since and --until; open ends reach the earliest and latest times."""
+    days = getattr(a, "days", None)
+    if days is None and not (getattr(a, "since", None) or getattr(a, "until", None)):
+        days = default_days
+    start = day(a.since) if getattr(a, "since", None) else (since(days) if days else "0000-01-01T00:00:00Z")
+    end = day(a.until, end=True) if getattr(a, "until", None) else "9999-12-31T00:00:00Z"
+    return start, end
 
 
 def date_filter(a, column):
@@ -175,7 +162,8 @@ def resolve(con, q, agent=None):
     if agent:
         sql += " and agent=?"
         args.append(agent)
-    rows = con.execute(sql + " order by updated_at desc limit 10", args).fetchall()
+    # A prefix can match a session and the helpers it started: the main session comes first.
+    rows = con.execute(sql + " order by kind='top' desc, updated_at desc limit 10", args).fetchall()
     if not rows:
         # By name, or for unnamed sessions by their first request, which is what lists show instead.
         args = [f"%{q}%", f"%{q}%"] + ([agent] if agent else [])
@@ -184,6 +172,9 @@ def resolve(con, q, agent=None):
                            + " and kind='top' order by updated_at desc limit 10", args).fetchall()
     if not rows:
         sys.exit(f"No session matches {q!r}.")
+    if len(rows) > 1 and rows[1]["kind"] == "helper" and rows[0]["kind"] == "top" and \
+            all(r["session_id"].startswith(rows[0]["session_id"] + "/") for r in rows[1:]):
+        return rows[0]  # the session itself, not the helpers named after it
     if len(rows) > 1 and not any(r["session_id"] == q or r["name"] == q for r in rows):
         print(f"{q!r} matches {len(rows)} sessions; showing the newest. Others:")
         for r in rows[1:]:
@@ -193,12 +184,31 @@ def resolve(con, q, agent=None):
     return (exact or rows)[0]
 
 
-def row_line(r):
+def row_line(r, running=None, open_n=0, when="updated_at"):
     tag = r["agent"] + ("·h" if r["kind"] == "helper" else "")
     name = r["name"] or one_line(r["first_request"], 60) or "(unnamed)"
-    return (f"{local(r['updated_at'])}  {tag:8} {one_line(name, 58):58}  "
+    live = recall.live_mark(running or {}, r["session_id"])
+    marks = (f"  open {open_n}" if open_n else "") + (f"  {live}" if live else "")
+    return (f"{local(r[when])}  {tag:8} {one_line(name, 58):58}  "
             f"t{r['turn_count']:<4} c{('≈' if r['commands_estimated'] else '') + str(r['command_count']):<6} "
-            f"f{r['file_change_count']:<4} {r['session_id'][:13]}")
+            f"f{r['file_change_count']:<4} {r['session_id'][:13]}{marks}")
+
+
+def not_current(con, rows, a):
+    """Rows without the session the asker is in (and its helpers), unless --include-current."""
+    if getattr(a, "include_current", False):
+        return list(rows), 0
+    current = recall.current_sessions(con)
+    kept = [r for r in rows if (r["agent"], r["session_id"]) not in current]
+    return kept, len(rows) - len(kept)
+
+
+def print_notes(con, left_out=0):
+    if left_out:
+        print("(Left out: the session you're in, which always matches its own words; --include-current includes it.)")
+    for note in recall.coverage(con):
+        print(f"(Note: {note}.)")
+    freshness_note(con)
 
 
 # ---------------------------------------------------------------- reading
@@ -206,78 +216,82 @@ def row_line(r):
 def cmd_search(a):
     a.query = " ".join(a.query)  # unquoted words arrive separately
     con = reader()
-    sql = """select f.agent, f.session_id, f.turn_index, s.name, s.updated_at, t.started_at,
-                    snippet(turns_fts, 0, '[', ']', ' … ', 14) req, snippet(turns_fts, 1, '[', ']', ' … ', 18) ans
-             from turns_fts f join sessions s on s.agent=f.agent and s.session_id=f.session_id
-             join turns t on t.agent=f.agent and t.session_id=f.session_id and t.turn_index=f.turn_index
-             where turns_fts match ?"""
-    args = [a.query]
-    if a.agent:
-        sql += " and f.agent=?"
-        args.append(a.agent)
-    if not a.helpers:
-        sql += " and s.kind='top'"
-    if a.project:
-        sql += " and (s.project like ? or s.cwd like ?)"
-        args += [f"%{a.project}%"] * 2
-    extra, extra_args = date_filter(a, "coalesce(t.started_at, s.updated_at)")
-    sql += extra + " order by bm25(turns_fts) limit ?"
-    args += extra_args + [a.limit]
+    start, end = window(a)
     try:
-        rows = con.execute(sql, args).fetchall()
-    except sqlite3.OperationalError as e:
-        # Punctuation (config.toml, foo-bar, don't) is query syntax to the search engine: retry with every
-        # word quoted, which searches the words literally.
-        quoted = " ".join('"' + w.replace('"', '""') + '"' for w in a.query.split())
-        try:
-            rows = con.execute(sql, [quoted] + args[1:]).fetchall()
-        except sqlite3.OperationalError:
-            sys.exit(f"Search couldn't read that query ({e}). Put words with punctuation inside double quotes, "
-                     'e.g. smem search \'"config.toml" error\'.')
-    any_word = False
-    plain = [w for w in a.query.split() if w.upper() not in ("AND", "OR", "NOT", "NEAR")]
-    if not rows and len(plain) > 1 and not re.search(r'["*:()]', a.query):
-        # Nothing has every word: show turns with any of them, best first, and say so.
-        either = " OR ".join('"' + w.replace('"', '""') + '"' for w in plain)
-        rows = con.execute(sql, [either] + args[1:]).fetchall()
-        any_word = bool(rows)
-    words = [w for w in re.findall(r"\w+", a.query) if w.upper() not in ("AND", "OR", "NOT", "NEAR")]
-    named = []
-    if words:  # session names aren't in the text index; list sessions whose name has every word
-        named = con.execute("select * from sessions where kind='top'" + " and name like ?" * len(words)
-                            + (" and agent=?" if a.agent else "") + " order by updated_at desc limit 5",
-                            [f"%{w}%" for w in words] + ([a.agent] if a.agent else [])).fetchall()
-    if named:
+        r = recall.search(con, a.query, agent=a.agent, project=a.project, start=start, end=end, helpers=a.helpers,
+                          mine=a.mine, limit=a.limit, include_current=a.include_current)
+    except ValueError as e:
+        sys.exit(f"Search: {e}. Put words with punctuation inside double quotes, e.g. smem search '\"config.toml\" error'.")
+    if r["named"]:
         print("Sessions named like this:")
-        for r in named:
-            print("  " + row_line(r))
+        for s in r["named"]:
+            print("  " + row_line(s))
         print()
-    if any_word:
-        print("No turn has all of those words; these have some of them, best first:")
-    if not rows:
-        print("No matches in requests or answers. Search matches whole words (and their endings); "
-              "try fewer or different words.")
-    for r in rows:
-        print(f"{local(r['started_at'] or r['updated_at'])}  {r['agent']:6} {one_line(r['name'], 50)}  "
-              f"[{r['session_id'][:13]} turn {r['turn_index'] + 1}]")
-        if r["req"].strip():
-            print(f"    YOU:   {one_line(r['req'], 220)}")
-        if r["ans"].strip():
-            print(f"    AGENT: {one_line(r['ans'], 220)}")
-    freshness_note(con)
+    if r["results"] and r["results"][0]["tier"] == 2:
+        print("No session has all of those words; these have some of them, best first:")
+    for n, res in enumerate(r["results"]):
+        s, b = res["session"], res["best"]
+        if n and res["tier"] == 2 and r["results"][n - 1]["tier"] == 1:
+            print("\nSessions with only some of the words:")
+        also = res["also"]
+        more = (", also " + ", ".join(str(i + 1) for i in also[:3]) + (f" and {len(also) - 3} more" if len(also) > 3 else "")
+                if also else "")
+        head = (f"{local(b['started_at'] or s['updated_at'])}  {s['agent']:6} {one_line(s['name'] or s['first_request'], 50)}  "
+                f"[{s['session_id'][:13]} turn {b['turn_index'] + 1}{more}]  whole session "
+                f"{tokens(recall.session_chars(con, s['agent'], s['session_id']))}")
+        flagged = instruction_like(b["req"], b["ans"])
+        if a.compact:  # the part that matched: the request's snippet starts the request even when only the answer matched
+            col = "ans" if b["ans_hit"] and not b["req_hit"] else "req" if b["req"].strip() else "ans"
+            part, at = b[col], b[col + "_at"]
+            if at > 50:  # start near the match so it fits on the line
+                part = "… " + part[at - 30:]
+            print(head + "  | " + one_line(part, 100) + ("  (instruction-like text)" if flagged else ""))
+            continue
+        print(head)
+        if b["req"].strip():
+            print(f"    YOU:   {one_line(b['req'], 220)}")
+        if b["ans"].strip():
+            print(f"    AGENT: {one_line(b['ans'], 220)}")
+        if flagged:
+            print(f"    ({INSTRUCTION_NOTE})")
+    if r["results"]:
+        top = r["results"][0]
+        print(f"\nRead a match without the rest of the session: smem session {top['session']['session_id'][:13]} "
+              f"--around {top['best']['turn_index'] + 1}")
+        if r["total"] > len(r["results"]):
+            print(f"Showing {len(r['results'])} of {plural(r['total'], 'matching session')}; --limit {r['total']} shows all.")
+    else:
+        print("No match in requests or answers. That isn't proof it didn't happen: search matches words (and their "
+              "endings), not meaning. Try other words, --helpers, a wider --days, or `smem catchup` for a time period.")
+    if a.explain:
+        label, ran = r["ran"]
+        print("\nHow this search ran:")
+        print(f"  query {a.query!r}, run {label}: {ran!r}" + ("; only your own requests (--mine)" if a.mine else ""))
+        if r["fallback"]:
+            print("  no session had every word, so sessions with some of them follow those with all")
+        filters = [f"assistant {a.agent}" if a.agent else "", f"project like {a.project!r}" if a.project else "",
+                   f"from {local(start)}" if not start.startswith("0000") else "",
+                   f"before {local(end)}" if not end.startswith("9999") else "",
+                   "" if a.helpers else "main sessions only (--helpers adds helper sessions)"]
+        print("  filters: " + ("; ".join(f for f in filters if f) or "none"))
+        print(f"  sessions matched: {r['total']}; shown: {len(r['results'])} (--limit {a.limit})")
+    print_notes(con, r["left_out"])
 
 
 def cmd_session(a):
     con = reader()
     s = resolve(con, a.id, a.agent)
-    print(f"{one_line(s['name'] or s['first_request'], 120) or '(unnamed)'}")
+    running = recall.running_now()
+    live = recall.live_mark(running, s["session_id"])
+    print(f"{one_line(s['name'] or s['first_request'], 120) or '(unnamed)'}" + (f"  {live}" if live else ""))
     print(f"  {s['agent']} {s['kind']}  id {s['session_id']}  origin {s['origin']}"
           f"{'  ARCHIVED' if s['archived'] else ''}")
     print(f"  project {s['project']}  cwd {s['cwd']}")
     print(f"  model {s['model']} {s['effort'] or ''}  branch {s['git_branch'] or '-'}  tokens {s['tokens_used'] or '-'}")
     est = f" (≈{s['commands_estimated']} estimated from code-mode source)" if s["commands_estimated"] else ""
     print(f"  {local(s['created_at'])} → {local(s['updated_at'])}  turns {s['turn_count']}  commands {s['command_count']}{est}"
-          f"  files {s['file_change_count']}  MCP {s['mcp_count']}  helpers {s['helper_count']}")
+          f"  files {s['file_change_count']}  MCP {s['mcp_count']}  helpers {s['helper_count']}"
+          f"  whole session {tokens(recall.session_chars(con, s['agent'], s['session_id']))}")
     if s["log_deleted_at"]:
         print(f"  its log was deleted (noticed {local(s['log_deleted_at'])}); the memory keeps it "
               "(settings: retention.keep; `smem forget` erases it)")
@@ -301,29 +315,68 @@ def cmd_session(a):
         print(f"  {nh} helper sessions (smem links {s['session_id'][:13]})")
     if s["inherited_context"] and not s["first_request"]:
         print(f"  inherited context (from parent, not this helper's own ask): {one_line(s['inherited_context'], 200)}")
+    plan = recall.plan_of(con, s["agent"], s["session_id"])
+    if plan and plan["items"]:
+        done = sum(1 for i in plan["items"] if i["status"] in ("completed", "done"))
+        print(f"  plan: {done} of {len(plan['items'])} steps done" + (f"; note: {one_line(plan['note'], 200)}" if plan["note"] else ""))
+    for kind, text in recall.open_work(con, s)[:6]:
+        print(f"  open ({kind}): {text}")
+    resume = recall.resume_command(s)
+    if resume:
+        print(f"  resume: {resume}")
     turns = con.execute("select * from turns where agent=? and session_id=? order by turn_index",
                         (s["agent"], s["session_id"])).fetchall()
-    shown = turns[-a.turns:] if a.turns else turns
-    clip = None if a.full else 500
+    if a.grep:
+        try:
+            rx = re.compile(a.grep, re.I)
+        except re.error as e:
+            sys.exit(f"--grep isn't a valid pattern ({e}).")
+        shown = [t for t in turns if rx.search(t["request"] or "") or rx.search(t["answer"] or "")]
+    elif a.around:
+        n = a.around - 1
+        if not 0 <= n < len(turns):
+            sys.exit(f"This session has turns 1 to {len(turns)}.")
+        shown = turns[max(0, n - a.context): n + a.context + 1]
+    else:
+        shown = turns[-a.turns:] if a.turns else turns
+    req_max, ans_max = (None, None) if a.full else (a.max_chars, a.max_chars * 2)
+    sid13 = s["session_id"][:13]
     for t in shown:
         print(f"\n--- turn {t['turn_index'] + 1}/{len(turns)}  {local(t['started_at'])}  "
               f"commands {t['commands']}  files {t['files']}")
-        if t["request"]:
-            print("  YOU:   " + (safe(t["request"]) if a.full else one_line(t["request"], clip)))
-        if t["answer"]:
-            print("  AGENT: " + (safe(t["answer"]) if a.full else one_line(t["answer"], clip * 2)))
+        if t["request"] and a.role != "agent":
+            print("  YOU:   " + clip(t["request"], req_max))
+        if t["answer"] and a.role != "you":
+            print("  AGENT: " + clip(t["answer"], ans_max))
+        if not a.full and ((t["request"] and len(t["request"]) > req_max) or (t["answer"] and len(t["answer"]) > ans_max)):
+            print(f"  (cut to fit; all of it: smem session {sid13} --around {t['turn_index'] + 1} --context 0 --full)")
+        if instruction_like(t["request"], t["answer"]):
+            print(f"  ({INSTRUCTION_NOTE})")
         if t["aborted"]:
             print("  (turn was cancelled)")
         if t["rewound"]:
             print("  (on a branch Codex later rewound past: this happened, but isn't on the thread's visible history)")
         if t["truncated"] and a.full:
             print("  (text longer than 200,000 characters was cut; the full text is in the original log)")
+    if a.grep and not shown:
+        print(f"\nNo turn of {len(turns)} matches {a.grep!r}. All turns: smem session {sid13} --turns 0")
+    elif len(shown) < len(turns):
+        nums = [t["turn_index"] + 1 for t in shown]
+        if len(nums) == 1:
+            span = f"turn {nums[0]}"
+        elif nums and nums == list(range(nums[0], nums[-1] + 1)):
+            span = f"turns {nums[0]}-{nums[-1]}"
+        else:
+            span = "turns " + ", ".join(map(str, nums[:12])) + (f" and {len(nums) - 12} more" if len(nums) > 12 else "")
+        print(f"\nShowing {span} of {len(turns)}. More: smem session {sid13} --around N, --grep WORDS, or --turns 0 for all.")
     files = con.execute("select path, change from files_touched where agent=? and session_id=? order by path",
                         (s["agent"], s["session_id"])).fetchall()
-    if files:
+    if files and (a.around or a.grep):
+        print(f"\nFiles touched: {len(files)} (smem session {sid13} lists them)")
+    elif files:
         print(f"\nFiles touched ({len(files)}):")
         for f in files[:40]:
-            print(f"  {f['change'] or '':7} {f['path']}")
+            print(f"  {f['change'] or '':7} {safe(f['path'])}")
         if len(files) > 40:
             print(f"  … and {len(files) - 40} more (smem sql lists them all)")
     freshness_note(con)
@@ -339,38 +392,42 @@ def cmd_recent(a):
     if a.agent:
         sql += " and agent=?"
         args.append(a.agent)
-    rows = con.execute(sql + " order by updated_at desc limit ?", args + [a.limit]).fetchall()
+    rows, left_out = not_current(con, con.execute(sql + " order by updated_at desc limit ?", args + [a.limit + 5]).fetchall(), a)
+    rows = rows[:a.limit]
+    running = recall.running_now()
     for r in rows:
-        print(row_line(r))
+        print(row_line(r, running, len(recall.open_work(con, r))))
     if not rows:
         newest = con.execute("select max(updated_at) from sessions" + ("" if a.helpers else " where kind='top'")
                              ).fetchone()[0]
         print("No sessions in that time." + (f" The newest is from {local(newest)}." if newest else ""))
-    freshness_note(con)
+    print_notes(con, left_out)
 
 
 def cmd_project(a):
     con = reader()
-    rows = con.execute("""select * from sessions where (project like ? or cwd like ?) and kind='top'
-                          order by updated_at desc limit ?""", (f"%{a.name}%", f"%{a.name}%", a.limit)).fetchall()
+    rows, left_out = not_current(con, con.execute("""select * from sessions where (project like ? or cwd like ?) and kind='top'
+                          order by updated_at desc limit ?""", (f"%{a.name}%", f"%{a.name}%", a.limit + 5)).fetchall(), a)
+    rows = rows[:a.limit]
     if not rows:
         print(f"No sessions for a project matching {a.name!r}.")
         return
     projects = sorted({r["project"] for r in rows if r["project"]})
     print(f"{plural(len(rows), 'session')} in {', '.join(projects[:6])}")
+    running = recall.running_now()
     for r in rows:
-        print(row_line(r))
+        print(row_line(r, running, len(recall.open_work(con, r))))
         if a.answers and r["last_answer"]:
             print(f"      last answer: {one_line(r['last_answer'], 200)}")
-    freshness_note(con)
+    print_notes(con, left_out)
 
 
 def cmd_files(a):
     con = reader()
-    rows = con.execute("""select f.path, f.change, f.turn_index, s.* from files_touched f
+    rows, left_out = not_current(con, con.execute("""select f.path, f.change, f.turn_index, s.* from files_touched f
                           join sessions s on s.agent=f.agent and s.session_id=f.session_id
                           where f.path like ? order by s.updated_at desc, f.session_id, f.path limit ?""",
-                       (f"%{a.path}%", a.limit)).fetchall()
+                                                  (f"%{a.path}%", a.limit)).fetchall(), a)
     if not rows:
         print(f"No session changed a file matching {a.path!r}.")
         return
@@ -381,7 +438,7 @@ def cmd_files(a):
             last = (r["agent"], r["session_id"])
         turn = f" turn {r['turn_index'] + 1}" if r["turn_index"] is not None else ""
         print(f"      {r['change'] or 'changed':7} {safe(r['path'])}{turn}")
-    freshness_note(con)
+    print_notes(con, left_out)
 
 
 def cmd_goals(a):
@@ -543,6 +600,214 @@ def cmd_forget(a):
         store.purge_deleted(con)  # erase the text from the file, not only from the index
         con.close()
     print("Forgotten. Updates won't read them again; `smem forget --undo ID` reverses that.")
+
+
+def print_brief(con, row, running, max_chars):
+    b = recall.brief(con, row, max_chars)
+    print(f"{one_line(row['name'] or row['first_request'], 90) or '(unnamed)'}  [{row['agent']} {row['session_id'][:13]}]  "
+          f"{local(row['created_at'])} → {local(row['updated_at'])}"
+          + (f"  {recall.live_mark(running, row['session_id'])}" if row["session_id"] in running else ""))
+    print(f"  Asked:  {b['asked'] or '(no request recorded)'}")
+    if b["result"]:
+        print(f"  Result: {b['result']}  (turn {b['result_turn'] + 1})")
+    else:
+        print("  Result: (no substantive answer recorded)")
+    if b["plan"] and b["plan"]["note"]:
+        print(f"  Plan note: {clip(' '.join(b['plan']['note'].split()), max_chars)}")
+    if b["open"]:
+        for kind, text in b["open"][:6]:
+            print(f"  Open ({kind}): {text}")
+    else:
+        print("  Open:   nothing recorded as open")
+    if b["files"]:
+        print("  Files:  " + ", ".join(safe(f) for f in b["files"]) + (f" (+{b['more_files']} more)" if b["more_files"] else ""))
+    if b["resume"]:
+        print(f"  Resume: {b['resume']}")
+    print(f"  Whole session {b['tokens']}; read part of it: smem session {row['session_id'][:13]} --around N")
+    if instruction_like(b["asked"], b["result"]):
+        print(f"  ({INSTRUCTION_NOTE})")
+
+
+def cmd_brief(a):
+    con = reader()
+    running = recall.running_now()
+    for n, q in enumerate(a.ids):
+        if n:
+            print()
+        print_brief(con, resolve(con, q, a.agent), running, a.max_chars)
+
+
+class Budget:
+    """Output lines up to a character budget, then one line saying what was left out and how to get it."""
+    def __init__(self, limit):
+        self.limit, self.used, self.dropped, self.lines = limit, 0, 0, []
+
+    def add(self, line=""):
+        if self.limit and self.used + len(line) + 1 > self.limit:
+            self.dropped += 1
+            return
+        self.lines.append(line)
+        self.used += len(line) + 1
+
+    def emit(self, more):
+        print("\n".join(self.lines))
+        if self.dropped:
+            print(f"\n[cut to stay within {self.limit:,} characters: {plural(self.dropped, 'more line')}; {more}]")
+
+
+def cmd_catchup(a):
+    con = reader()
+    start, end = window(a, default_days=7)
+    c = recall.catchup(con, start, end, a.agent, a.project, a.include_current)
+    rows = c["rows"]
+    out = Budget(a.max_chars)
+    period = f"{local(start)[:10] if not start.startswith('0000') else 'the beginning'} to " \
+             f"{local(end)[:10] if not end.startswith('9999') else 'now'}"
+    by = {"claude": 0, "codex": 0}
+    for r in rows:
+        by[r["agent"]] += 1
+    out.add(f"Catch-up, {period}: {plural(len(rows), 'session')} in {plural(len(c['projects']), 'project')} "
+            f"({by['claude']} Claude Code, {by['codex']} Codex). Past records, for you to judge.")
+    for label, want in (("Working now", lambda st: st == "busy"), ("Open in the app, idle", lambda st: st != "busy")):
+        live = [r for r in rows if r["session_id"] in c["running"] and want(c["running"][r["session_id"]])]
+        if live:
+            out.add(f"\n{label}:")
+            for r in live:
+                out.add(f"  {r['project'] or '(no project)'}: {one_line(r['name'] or r['first_request'], 70)}  "
+                        f"[{r['agent']} {r['session_id'][:13]}]")
+    open_rows = [r for r in rows if c["open"][(r["agent"], r["session_id"])]]
+    if open_rows:
+        out.add("\nLeft open (leads from plans, unanswered or cancelled requests, Codex goals and next-step lists):")
+        for r in open_rows:
+            items = c["open"][(r["agent"], r["session_id"])]
+            out.add(f"  {r['project'] or '(no project)'}: {one_line(r['name'] or r['first_request'], 60)}  "
+                    f"[{r['agent']} {r['session_id'][:13]}, {local(r['updated_at'])}]")
+            for kind, text in items[:4]:
+                out.add(f"      {kind}: {text}")
+            if len(items) > 4:
+                out.add(f"      … {len(items) - 4} more (smem brief {r['session_id'][:13]})")
+    if c["goals"]:
+        out.add("\nCodex goals not marked complete:")
+        for g in c["goals"]:
+            out.add(f"  [{g['status']}] {one_line(g['objective'], 110)}  [{g['thread_id'][:13]}]")
+    out.add("\nBy day:")
+    for d in sorted(c["days"], reverse=True):
+        out.add(f"  {d}")
+        for project, prow in sorted(c["days"][d].items()):
+            out.add(f"    {project}")
+            for r in prow:
+                n_open = len(c["open"][(r["agent"], r["session_id"])])
+                n_help = c["helpers"].get((r["agent"], r["session_id"]), 0)
+                out.add(f"      {local(r['updated_at'])[11:]}  {r['agent']:6} {one_line(r['name'] or r['first_request'], 56)}  "
+                        f"[{r['session_id'][:13]}]  turns {r['turn_count']}, files {r['file_change_count']}"
+                        + (f", {plural(n_help, 'helper')}" if n_help else "") + (f", open {n_open}" if n_open else "")
+                        + (f"  {recall.live_mark(c['running'], r['session_id'])}" if r["session_id"] in c["running"] else ""))
+    if not rows:
+        out.add("  No sessions in that period.")
+    out.add("\nGo deeper: smem brief ID ID …, smem session ID --around N, smem timeline ID, smem handoff ID.")
+    out.emit(f"--max-chars {max(a.max_chars * 2, 20000)} shows more, or narrow with --project or --since")
+    print_notes(con)
+
+
+def cmd_timeline(a):
+    con = reader()
+    target = a.target
+    looks_like_id = re.fullmatch(r"[0-9a-f][0-9a-f-]{7,}(/agent-[0-9a-f]+)?", target) is not None
+    row = None
+    if looks_like_id:
+        row = con.execute("select * from sessions where session_id=? or session_id like ? || '%' "
+                          "order by updated_at desc limit 1", (target, target)).fetchone()
+    running = recall.running_now()
+    if row is not None:
+        rows = recall.timeline(con, row=row, before=a.before, after=a.after, include_current=a.include_current)
+        print(f"Around one session, in {row['project'] or row['cwd']} (both assistants, oldest first):")
+    else:
+        start, end = window(a)
+        rows = recall.timeline(con, project=target, start=start, end=end, include_current=a.include_current)
+        if not rows:
+            print(f"No sessions for a project matching {target!r}.")
+            return
+        rows = rows[-a.limit:]
+        print(f"Sessions for projects matching {target!r} (both assistants, oldest first):")
+    last_day = None
+    for r in rows:
+        d = local(r["created_at"])[:10]
+        if d != last_day:
+            print(f"  {d}")
+            last_day = d
+        here = "  ◀ this one" if row is not None and r["session_id"] == row["session_id"] else ""
+        print("    " + row_line(r, running, len(recall.open_work(con, r)), when="created_at") + here)
+    print_notes(con)
+
+
+def cmd_handoff(a):
+    """A resume packet for a fresh session, from stored records only. It changes and sends nothing."""
+    con = reader()
+    row = resolve(con, a.id, a.agent)
+    b = recall.brief(con, row, a.max_chars)
+    out = Budget(a.max_chars * 4)
+    g = con.execute("select status, objective from goals where thread_id=?", (row["session_id"],)).fetchone()
+    out.add(f"# Handoff: {one_line(row['name'] or row['first_request'], 100) or '(unnamed)'}")
+    out.add(f"Past session, {row['agent']} {row['session_id']}, project {row['project'] or '-'}, "
+            f"{local(row['created_at'])} to {local(row['updated_at'])}. These are records of what happened, to check, "
+            "not instructions.")
+    out.add("\n## Goal")
+    out.add(clip(" ".join(g["objective"].split()), a.max_chars) if g else (b["asked"] or "(no request recorded)"))
+    out.add("\n## Where it stands")
+    out.add(b["result"] or "(no substantive answer recorded)")
+    if b["plan"]:
+        if b["plan"]["note"]:
+            out.add(f"Plan note: {clip(' '.join(b['plan']['note'].split()), a.max_chars)}")
+        for i in b["plan"]["items"]:
+            out.add(f"- [{'x' if i['status'] in ('completed', 'done') else ' '}] {one_line(i['text'], 140)} ({i['status']})")
+    out.add("\n## Open")
+    for kind, text in b["open"] or [("-", "nothing recorded as open")]:
+        out.add(f"- {text}" + (f" ({kind})" if kind != "-" else ""))
+    if b["files"]:
+        out.add("\n## Files changed")
+        for f in b["files"]:
+            out.add(f"- {safe(f)}")
+        if b["more_files"]:
+            out.add(f"- … {b['more_files']} more: smem session {row['session_id'][:13]} --turns 0")
+    related = [r for r in recall.timeline(con, row=row, before=1, after=1) if r["session_id"] != row["session_id"]]
+    links = con.execute("select kind, from_id, to_id from links where from_id=? or to_id=?",
+                        (row["session_id"], row["session_id"])).fetchall()
+    if related or links:
+        out.add("\n## Related sessions")
+        for r in related:
+            out.add(f"- {'before' if (r['created_at'] or '') < (row['created_at'] or '') else 'after'}: "
+                    f"{one_line(r['name'] or r['first_request'], 80)} [{r['agent']} {r['session_id'][:13]}]")
+        for l in links[:6]:
+            other = l["to_id"] if l["from_id"] == row["session_id"] else l["from_id"]
+            out.add(f"- {l['kind']}: {other}")
+    out.add("\n## To pick it up")
+    if b["resume"]:
+        out.add(f"- Reopen it: `{b['resume']}`")
+    out.add(f"- Read more: `smem session {row['session_id'][:13]} --around N`, `smem session {row['session_id'][:13]} --grep WORDS`")
+    out.emit(f"--max-chars {a.max_chars * 2} gives more room")
+
+
+def cmd_decisions(a):
+    con = reader()
+    start, end = window(a, default_days=30)
+    found = recall.decisions(con, start, end, a.project, a.agent, a.limit, a.include_current)
+    print("Sentences that read like decisions, found by their wording alone: leads to check against the session, "
+          "not facts (wording also finds decisions that were later reversed).")
+    if not found:
+        print("\nNone found in that period. Try a wider --days, or `smem search` with the topic's words.")
+    last_day = None
+    for f in found:
+        t = f["turn"]
+        d = local(t["started_at"])[:10]
+        if d != last_day:
+            print(f"\n{d}")
+            last_day = d
+        s = con.execute("select name, first_request, project from sessions where agent=? and session_id=?",
+                        (t["agent"], t["session_id"])).fetchone()
+        print(f"  {s['project'] or '-'}: {one_line(s['name'] or s['first_request'], 50)}  "
+              f"[{t['agent']} {t['session_id'][:13]} turn {t['turn_index'] + 1}]")
+        print(f"    {'You' if f['who'] == 'you' else 'Assistant'}: {one_line(f['text'], 260)}")
+    print_notes(con)
 
 
 def cmd_schema(a):
@@ -967,18 +1232,32 @@ def parser():
         p.add_argument("--since", metavar="YYYY-MM-DD", help="from this day on (local time)")
         p.add_argument("--until", metavar="YYYY-MM-DD", help="up to and including this day")
 
+    def current(p):
+        p.add_argument("--include-current", action="store_true",
+                       help="include the session you're in (left out by default: it matches its own words)")
+
     p = cmd("search", cmd_search, "full-text search over your requests and the assistants' answers")
     p.add_argument("query", nargs="+", help='words (all must match), "an exact phrase", OR, NOT, prefix*')
     p.add_argument("--agent", choices=AGENT_CHOICES)
     p.add_argument("--project", help="only sessions whose project or folder contains this")
     dates(p, "only turns from the last N days")
     p.add_argument("--helpers", action="store_true", help="include helper (sub-agent) sessions")
-    p.add_argument("--limit", type=int, default=15, help="most results to show (default 15)")
+    p.add_argument("--mine", action="store_true", help="search only your own requests, not the answers")
+    p.add_argument("--compact", action="store_true", help="one line per session")
+    p.add_argument("--explain", action="store_true", help="say how the search ran: query, filters, what was left out")
+    p.add_argument("--limit", type=int, default=15, help="most sessions to show (default 15)")
+    current(p)
 
     p = cmd("session", cmd_session, "one session: details, links, recent turns, files changed")
     p.add_argument("id", help="a session id, its first characters, or part of its name")
     p.add_argument("--agent", choices=AGENT_CHOICES)
     p.add_argument("--turns", type=int, default=5, help="how many recent turns to show (0 = all)")
+    p.add_argument("--around", type=int, metavar="N", help="show turn N and the turns around it")
+    p.add_argument("--context", type=int, default=2, metavar="K", help="with --around: turns on each side (default 2)")
+    p.add_argument("--grep", metavar="PATTERN", help="show only turns whose request or answer matches (a regex)")
+    p.add_argument("--role", choices=["you", "agent"], help="show only your requests, or only the answers")
+    p.add_argument("--max-chars", type=int, default=500,
+                   help="cut each request at this many characters, answers at twice that (default 500)")
     p.add_argument("--full", action="store_true", help="show whole requests and answers")
 
     p = cmd("recent", cmd_recent, "sessions active recently, newest first")
@@ -987,15 +1266,53 @@ def parser():
     p.add_argument("--agent", choices=AGENT_CHOICES)
     p.add_argument("--helpers", action="store_true", help="include helper (sub-agent) sessions")
     p.add_argument("--limit", type=int, default=40, help="most sessions to show (default 40)")
+    current(p)
 
     p = cmd("project", cmd_project, "a project's sessions, newest first")
     p.add_argument("name")
     p.add_argument("--limit", type=int, default=30, help="most sessions to show (default 30)")
     p.add_argument("--answers", action="store_true", help="add each session's last answer")
+    current(p)
 
     p = cmd("files", cmd_files, "sessions that changed a file whose path contains PATH")
     p.add_argument("path")
     p.add_argument("--limit", type=int, default=30, help="most changes to show (default 30)")
+    current(p)
+
+    p = cmd("catchup", cmd_catchup, "what happened in a period and what's still open: by day and project, with "
+                                    "open work, Codex goals and sessions running now")
+    dates(p, "the last N days (default 7)")
+    p.add_argument("--agent", choices=AGENT_CHOICES)
+    p.add_argument("--project", help="only projects whose name or folder contains this")
+    p.add_argument("--max-chars", type=int, default=8000, help="cut the output at this many characters (default 8000)")
+    current(p)
+
+    p = cmd("brief", cmd_brief, "a few lines per session: what was asked, the last real result, what's open, files")
+    p.add_argument("ids", nargs="+", metavar="ID", help="session ids, first characters, or parts of names")
+    p.add_argument("--agent", choices=AGENT_CHOICES)
+    p.add_argument("--max-chars", type=int, default=500, help="cut each text at this many characters (default 500)")
+
+    p = cmd("timeline", cmd_timeline, "sessions in date order, either around one session (same project, both "
+                                      "assistants) or for a project")
+    p.add_argument("target", help="a session id (at least 8 characters) or a project name")
+    p.add_argument("--before", type=int, default=3, help="around a session: how many before it (default 3)")
+    p.add_argument("--after", type=int, default=3, help="around a session: how many after it (default 3)")
+    dates(p, "for a project: the last N days")
+    p.add_argument("--limit", type=int, default=60, help="for a project: the most recent N sessions (default 60)")
+    current(p)
+
+    p = cmd("handoff", cmd_handoff, "a resume packet for picking a session up in a fresh one: goal, where it "
+                                    "stands, what's open, files, related sessions")
+    p.add_argument("id", help="a session id, its first characters, or part of its name")
+    p.add_argument("--agent", choices=AGENT_CHOICES)
+    p.add_argument("--max-chars", type=int, default=1000, help="cut each text at this many characters (default 1000)")
+
+    p = cmd("decisions", cmd_decisions, "sentences that read like decisions, as leads to check (wording, not meaning)")
+    p.add_argument("project", nargs="?", help="only projects whose name or folder contains this")
+    dates(p, "the last N days (default 30)")
+    p.add_argument("--agent", choices=AGENT_CHOICES)
+    p.add_argument("--limit", type=int, default=30, help="most sentences to show (default 30)")
+    current(p)
 
     p = cmd("goals", cmd_goals, "Codex goals")
     p.add_argument("--status", help="e.g. active, complete, blocked")

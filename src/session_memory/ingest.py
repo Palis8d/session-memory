@@ -32,13 +32,23 @@ def _parse_claude(args):
         return args, None, f"{type(e).__name__}: {e}"
 
 
+RACY_SECONDS = 2  # a log written this recently may still be mid-write within the clock's resolution
+
+
 def _sig(paths):
     """None when a log vanished since the scan (Codex moves logs when it archives a session): skipped this
-    run, read at its new place next time."""
+    run, read at its new place next time. A log written in the last moments gets a one-off signature, so
+    the next update reads it again rather than trusting a size and time that may not have settled."""
     try:
-        return _sig_of(paths)
+        return _settled(_sig_of(paths), paths)
     except FileNotFoundError:
         return None
+
+
+def _settled(sig, paths):
+    if time.time() - max(os.path.getmtime(p) for p in paths) < RACY_SECONDS:
+        sig += f"|racy:{time.time_ns()}"  # never matches next time, so the log is read again
+    return sig
 
 
 def _sig_of(paths):
@@ -420,7 +430,7 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
     ctodo = []
     for a in logs:
         try:
-            sig = claude.log_sig(a[0])  # before reading; see the Codex note above
+            sig = _settled(claude.log_sig(a[0]), [a[0]])  # before reading; see the Codex note above
         except FileNotFoundError:  # removed since the scan: skipped this run
             stats["moved_during_update"] = stats.get("moved_during_update", 0) + 1
             continue

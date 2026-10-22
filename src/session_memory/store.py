@@ -14,7 +14,7 @@ _DB_NAME = os.environ.get("SESSION_MEMORY_DB_NAME", "memory.sqlite")
 if os.path.basename(_DB_NAME) != _DB_NAME or _DB_NAME in ("", ".", ".."):
     raise SystemExit(f"SESSION_MEMORY_DB_NAME must be a plain file name, not {_DB_NAME!r}")
 DB_PATH = os.path.join(DATA_DIR, _DB_NAME)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 create table if not exists meta (key text primary key, value text);
@@ -64,6 +64,7 @@ create table if not exists sessions (
   first_request text,
   last_answer text,
   unknown_types text,               -- json {type: count} not recognized by the adapter
+  unknown_shapes text,              -- json {type: field names} of those records, never their content
   ingested_at text,
   log_deleted_at text,              -- when smem found the log gone; the session is kept (settings: retention.keep)
   log_deleted_how text,             -- auto (looks like the assistant's own cleanup) | deliberate (looks deleted by hand)
@@ -87,7 +88,17 @@ create table if not exists turns (
   mcp integer default 0,
   aborted integer default 0,            -- the turn was cancelled; no answer is expected
   rewound integer default 0,            -- on a branch Codex later rewound past; real but not on the visible history
+  recalls integer default 0,            -- the assistant ran smem in this turn: its answer may quote other sessions
   primary key (agent, session_id, turn_index)
+);
+
+create table if not exists plans (
+  agent text not null,
+  session_id text not null,
+  items text,                       -- json [{"text", "status"}]: the session's last recorded plan (its own to-do list)
+  note text,                        -- the explanation given with that plan update, if any
+  updated_at text,
+  primary key (agent, session_id)
 );
 
 create table if not exists files_touched (
@@ -460,7 +471,7 @@ def copy_sessions(src, dst, agent, ids):
     """Copy whole sessions (metadata, turns, search text, files, mentions) from one store into another, by
     the columns both have, so a store built by an older version can hand its sessions on."""
     ids = list(ids)
-    for table in ("sessions", "turns", "files_touched", "mentions", "turns_fts"):
+    for table in ("sessions", "turns", "files_touched", "mentions", "plans", "turns_fts"):
         have = [r[1] for r in src.execute(f"pragma table_info({table})")]
         want = {r[1] for r in dst.execute(f"pragma table_info({table})")}
         cols = [c for c in have if c in want]
@@ -476,7 +487,7 @@ def copy_sessions(src, dst, agent, ids):
 
 
 def delete_session(con, agent, sid):
-    for table in ("turns", "files_touched", "turns_fts"):
+    for table in ("turns", "files_touched", "plans", "turns_fts"):
         con.execute(f"delete from {table} where agent=? and session_id=?", (agent, sid))
     con.execute("delete from sessions where agent=? and session_id=?", (agent, sid))
 
@@ -502,6 +513,14 @@ def replace_session(con, rec):
     for f in ("tool_names", "tool_first_seen"):
         if isinstance(rec.get(f), dict):
             rec[f] = json.dumps(rec[f])
+    for f in ("unknown_shapes",):
+        rec[f] = json.dumps(rec.get(f) or {})
+    plan = rec.pop("plan", None)
+    con.execute("delete from plans where agent=? and session_id=?", (agent, sid))
+    if plan and plan.get("items"):
+        items = [{"text": clean(str(i.get("text") or "")), "status": str(i.get("status") or "")} for i in plan["items"]]
+        con.execute("insert into plans values (?,?,?,?,?)",
+                    (agent, sid, json.dumps(items), clean(plan.get("note")) if plan.get("note") else None, plan.get("at")))
     rec["ingested_at"] = now_iso()
     cols = [c for c in rec if not c.startswith("_")]
     con.execute(f"insert or replace into sessions ({','.join(cols)}) values ({','.join('?' * len(cols))})",
@@ -510,9 +529,10 @@ def replace_session(con, rec):
         req, rt = scrub(t.get("request"))
         ans, at = scrub(t.get("answer"))
         con.execute("""insert into turns (agent, session_id, turn_index, started_at, request, answer, commands,
-                       files, truncated, estimated, mcp, aborted, rewound) values (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       files, truncated, estimated, mcp, aborted, rewound, recalls) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (agent, sid, i, t.get("started_at"), req, ans, t.get("commands", 0), len(t.get("files", ())),
-                     int(rt or at), t.get("estimated", 0), t.get("mcp", 0), t.get("aborted", 0), t.get("rewound", 0)))
+                     int(rt or at), t.get("estimated", 0), t.get("mcp", 0), t.get("aborted", 0), t.get("rewound", 0),
+                     int(bool(t.get("recalls")))))
         if req or ans:
             con.execute("insert into turns_fts (request, answer, agent, session_id, turn_index) values (?,?,?,?,?)",
                         (req or "", ans or "", agent, sid, i))

@@ -39,7 +39,7 @@ def list_logs():
     return out
 
 
-ADAPTER_VERSION = 7  # bump when parsing changes so `smem update` re-reads every Claude log
+ADAPTER_VERSION = 8  # bump when parsing changes so `smem update` re-reads every Claude log
 
 
 def cleanup_days():
@@ -84,6 +84,38 @@ def project_from_cwd(cwd):
     return by_repo(cwd)
 
 
+# A command that runs smem itself: the turn's answer may quote other sessions (see search ranking).
+RECALL_RE = re.compile(r"(?<![\w/.-])(smem|session_memory)(?![\w-])")
+
+
+def plan_update(items, inp):
+    """The plan after one plan-tool call. Claude Code's TodoWrite sends the whole list ({todos}); some apps'
+    update_plan tools send the whole list ({items}) or step changes ({advance}, {done: [n]}, {start: n})."""
+    whole = inp.get("todos") if isinstance(inp.get("todos"), list) else inp.get("items")
+    if isinstance(whole, list):
+        return [{"text": i.get("content") or i.get("step") or "", "status": i.get("status") or "pending"}
+                for i in whole if isinstance(i, dict)]
+    items = [dict(i) for i in items or []]
+    if inp.get("advance"):
+        doing = next((i for i in items if i["status"] == "in_progress"), None)
+        if doing:
+            doing["status"] = "completed"
+        nxt = next((i for i in items if i["status"] == "pending"), None)
+        if nxt:
+            nxt["status"] = "in_progress"
+    for n in inp.get("done") or []:
+        if isinstance(n, int) and 1 <= n <= len(items):
+            items[n - 1]["status"] = "completed"
+    start = inp.get("start")
+    if isinstance(start, int) and 1 <= start <= len(items):
+        items[start - 1]["status"] = "in_progress"
+    return items
+
+
+def is_plan_tool(name):
+    return name == "TodoWrite" or name.endswith("update_plan")
+
+
 def parse_log(path, session_id, parent_id):
     turns, cur = [], None
     files, pending_edits = {}, {}
@@ -92,103 +124,115 @@ def parse_log(path, session_id, parent_id):
     title = agent_name = ai_title = cwd = branch = model = first_ts = last_ts = inherited = None
     mentions = set()
     mcp = helpers = command_signals = message_signals = 0
+    shapes, plan = {}, None
 
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                errors += 1
-                continue
-            if not isinstance(d, dict):
-                continue
-            typ = d.get("type")
-            if typ not in KNOWN_TYPES:
-                unknown[f"type:{typ}"] += 1
-            ts = d.get("timestamp")
-            if ts:
-                first_ts = first_ts or ts
-                last_ts = ts
-            if typ == "custom-title":
-                title = d.get("customTitle") or title
-            elif typ == "agent-name":
-                agent_name = d.get("agentName") or agent_name
-            elif typ == "ai-title":
-                ai_title = d.get("aiTitle") or ai_title
-            cwd = d.get("cwd") or cwd
-            branch = d.get("gitBranch") or branch
-            msg = d.get("message") if isinstance(d.get("message"), dict) else None
-            if typ == "user" and msg and not d.get("isMeta"):
-                if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):
-                    # Generated continuation summary after a compaction: context, not the user's words.
-                    inherited = inherited or _user_prompt(msg) or None
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    errors += 1
                     continue
-                prompt = _user_prompt(msg)
-                c = msg.get("content")
-                blocks = c if isinstance(c, list) else []
-                is_result = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks)
-                if not is_result and not (blocks and all(isinstance(b, dict) and b.get("type") in NON_TEXT_BLOCKS
-                                                         for b in blocks)):
-                    # A user message is read when its text is where the adapter looks for it: a string, or
-                    # a text block with a `text` string. Image-only messages aren't text records.
-                    reads["user_records"] += 1
-                    reads["user_read"] += isinstance(c, str) or any(
-                        isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
-                        for b in blocks)
-                if prompt:
-                    message_signals += 1
-                    cur = {"started_at": ts, "request": prompt, "answer": None, "commands": 0, "files": set()}
-                    turns.append(cur)
+                if not isinstance(d, dict):
                     continue
-                for b in msg.get("content") if isinstance(msg.get("content"), list) else []:
-                    if isinstance(b, dict) and b.get("type") == "tool_result":
-                        mentions.update(UUID_RE.findall(json.dumps(b.get("content"))[:200000]))
-                        edit = pending_edits.pop(b.get("tool_use_id"), None)
-                        if edit and not b.get("is_error"):
-                            fp, change, ti = edit
-                            files.setdefault(fp, (change, ti))
-                            turns[ti]["files"].add(fp)
-            elif typ == "assistant" and msg:
-                model = msg.get("model") or model
-                if cur is None:
-                    cur = {"started_at": ts, "request": None, "answer": None, "commands": 0, "files": set()}
-                    turns.append(cur)
-                texts = []
-                for b in msg.get("content") or []:
-                    if not isinstance(b, dict):
+                typ = d.get("type")
+                typ = typ if isinstance(typ, str) else f"<{type(typ).__name__}>"
+                if typ not in KNOWN_TYPES:
+                    unknown[f"type:{typ}"] += 1
+                    shapes.setdefault(f"type:{typ}", ",".join(sorted(map(str, d)))[:300])  # field names only
+                ts = d.get("timestamp") if isinstance(d.get("timestamp"), str) else None
+                if ts:
+                    first_ts = first_ts or ts
+                    last_ts = ts
+                if typ == "custom-title":
+                    title = d.get("customTitle") or title
+                elif typ == "agent-name":
+                    agent_name = d.get("agentName") or agent_name
+                elif typ == "ai-title":
+                    ai_title = d.get("aiTitle") or ai_title
+                cwd = d.get("cwd") if isinstance(d.get("cwd"), str) else cwd
+                branch = d.get("gitBranch") if isinstance(d.get("gitBranch"), str) else branch
+                msg = d.get("message") if isinstance(d.get("message"), dict) else None
+                if typ == "user" and msg and not d.get("isMeta"):
+                    if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):
+                        # Generated continuation summary after a compaction: context, not the user's words.
+                        inherited = inherited or _user_prompt(msg) or None
                         continue
-                    if b.get("type") == "text" and b.get("text", "").strip():
-                        texts.append(b["text"].strip())
-                    elif b.get("type") == "tool_use":
-                        name = b.get("name") or ""
-                        inp = b.get("input") or {}
-                        tools[name] += 1
-                        if ts and (name not in tool_first or ts < tool_first[name]):
-                            tool_first[name] = ts
-                        if name == "Bash":
-                            command_signals += 1
-                            cur["commands"] += 1
-                            mentions.update(UUID_RE.findall(str(inp.get("command", ""))))
-                        elif name in FILE_TOOLS and (inp.get("file_path") or inp.get("notebook_path")):
-                            fp = inp.get("file_path") or inp.get("notebook_path")
-                            # Counted once its tool result arrives without an error.
-                            pending_edits[b.get("id")] = (fp, "add" if name == "Write" else "update", len(turns) - 1)
-                        elif name in ("Agent", "Task"):
-                            helpers += 1
-                        elif name.startswith("mcp__"):
-                            mcp += 1
-                other = [b for b in msg.get("content") or [] if isinstance(b, dict) and b.get("type") not in AGENT_NON_TEXT]
-                if other:
-                    # Anything that isn't a tool call or thinking should be readable text; a renamed block
-                    # type or field shows up as a record that wasn't read.
-                    reads["agent_records"] += 1
-                    reads["agent_read"] += any(b.get("type") == "text" and isinstance(b.get("text"), str) for b in other)
-                if texts:
-                    message_signals += 1
-                    cur["answer"] = "\n\n".join(texts)
+                    prompt = _user_prompt(msg)
+                    c = msg.get("content")
+                    blocks = c if isinstance(c, list) else []
+                    is_result = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks)
+                    if not is_result and not (blocks and all(isinstance(b, dict) and b.get("type") in NON_TEXT_BLOCKS
+                                                             for b in blocks)):
+                        # A user message is read when its text is where the adapter looks for it: a string, or
+                        # a text block with a `text` string. Image-only messages aren't text records.
+                        reads["user_records"] += 1
+                        reads["user_read"] += isinstance(c, str) or any(
+                            isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+                            for b in blocks)
+                    if prompt:
+                        message_signals += 1
+                        cur = {"started_at": ts, "request": prompt, "answer": None, "commands": 0, "files": set(),
+                               "recalls": 0}
+                        turns.append(cur)
+                        continue
+                    for b in msg.get("content") if isinstance(msg.get("content"), list) else []:
+                        if isinstance(b, dict) and b.get("type") == "tool_result":
+                            mentions.update(UUID_RE.findall(json.dumps(b.get("content"))[:200000]))
+                            edit = pending_edits.pop(b.get("tool_use_id"), None)
+                            if edit and not b.get("is_error"):
+                                fp, change, ti = edit
+                                files.setdefault(fp, (change, ti))
+                                turns[ti]["files"].add(fp)
+                elif typ == "assistant" and msg:
+                    model = msg.get("model") or model
+                    if cur is None:
+                        cur = {"started_at": ts, "request": None, "answer": None, "commands": 0, "files": set(),
+                               "recalls": 0}
+                        turns.append(cur)
+                    texts = []
+                    for b in msg.get("content") or []:
+                        if not isinstance(b, dict):
+                            continue
+                        if b.get("type") == "text" and b.get("text", "").strip():
+                            texts.append(b["text"].strip())
+                        elif b.get("type") == "tool_use":
+                            name = b.get("name") or ""
+                            inp = b.get("input") or {}
+                            tools[name] += 1
+                            if ts and (name not in tool_first or ts < tool_first[name]):
+                                tool_first[name] = ts
+                            if name == "Bash":
+                                command_signals += 1
+                                cur["commands"] += 1
+                                mentions.update(UUID_RE.findall(str(inp.get("command", ""))))
+                                if RECALL_RE.search(str(inp.get("command", ""))):
+                                    cur["recalls"] = 1
+                            elif is_plan_tool(name) and isinstance(inp, dict):
+                                plan = {"items": plan_update((plan or {}).get("items"), inp), "note": None, "at": ts}
+                            elif name in FILE_TOOLS and (inp.get("file_path") or inp.get("notebook_path")):
+                                fp = inp.get("file_path") or inp.get("notebook_path")
+                                # Counted once its tool result arrives without an error.
+                                pending_edits[b.get("id")] = (fp, "add" if name == "Write" else "update", len(turns) - 1)
+                            elif name in ("Agent", "Task"):
+                                helpers += 1
+                            elif name.startswith("mcp__"):
+                                mcp += 1
+                    other = [b for b in msg.get("content") or [] if isinstance(b, dict) and b.get("type") not in AGENT_NON_TEXT]
+                    if other:
+                        # Anything that isn't a tool call or thinking should be readable text; a renamed block
+                        # type or field shows up as a record that wasn't read.
+                        reads["agent_records"] += 1
+                        reads["agent_read"] += any(b.get("type") == "text" and isinstance(b.get("text"), str) for b in other)
+                    if texts:
+                        message_signals += 1
+                        cur["answer"] = "\n\n".join(texts)
+            except (TypeError, AttributeError, KeyError, ValueError, IndexError):
+                errors += 1  # a record of an unexpected shape: counted (health reports it) and skipped, the rest is still read
 
     out_turns = [{"started_at": t["started_at"], "request": t["request"], "answer": t["answer"],
-                  "commands": t["commands"], "estimated": 0, "mcp": 0,
+                  "commands": t["commands"], "estimated": 0, "mcp": 0, "recalls": t.get("recalls", 0),
                   "aborted": int(bool(t["request"]) and t["request"].startswith("[Request interrupted")),
                   "files": sorted(t["files"]),
                   "raw_hash": hashlib.sha1(f"{t['request']}\x00{t['answer']}".encode("utf-8", "replace")).hexdigest()}
@@ -201,7 +245,8 @@ def parse_log(path, session_id, parent_id):
         "git_branch": branch, "created_at": first_ts[:19] + "Z" if first_ts else None,
         "updated_at": last_ts[:19] + "Z" if last_ts else None,
         "archived": 0, "tokens_used": None, "log_path": path,
-        "turns": out_turns, "files": files, "unknown_types": dict(unknown), "parse_errors": errors,
+        "turns": out_turns, "files": files, "unknown_types": dict(unknown), "unknown_shapes": shapes,
+        "plan": plan, "parse_errors": errors,
         "command_count": sum(t["commands"] for t in turns), "commands_estimated": 0,
         "file_change_count": len(files), "mcp_count": mcp, "helper_count": helpers, "inherited_context": inherited,
         "command_signals": command_signals, "message_signals": message_signals, "tool_names": dict(tools),

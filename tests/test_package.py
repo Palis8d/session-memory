@@ -423,6 +423,11 @@ def test_exclusions_are_exact_complete_and_erased():
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "t.sqlite")
             con = store.connect(db)
+            settled = time.time() - 60  # logs written a minute ago: unchanged from now on, so not re-read
+            for root in (config.claude_home(), config.codex_home()):
+                for folder, _, names in os.walk(root):
+                    for n in names:
+                        os.utime(os.path.join(folder, n), (settled, settled))
             _update(con)
             assert con.execute("select count(*) from sessions").fetchone()[0] == 5
             exclude = "/WORK/Acme" if sys.platform == "darwin" else "/work/acme"  # macOS folders ignore case
@@ -690,7 +695,7 @@ def test_forget_erases_for_good_and_can_be_undone():
         raw = open(store.DB_PATH, "rb").read()
         assert b"KEEPWORD" not in raw and b"HELPERWORD" not in raw
         _smem("update")  # the logs still exist; forgotten sessions stay out
-        assert "No matches" in _smem("search", "KEEPWORD").stdout
+        assert "No match" in _smem("search", "KEEPWORD").stdout
         assert os.path.exists(main) and os.path.exists(helper)  # forgetting never touches the logs
         listed = _smem("forget", "--list").stdout
         assert "66666666-0000-0000-0000-000000000001" in listed and "agent-a1" in listed, listed

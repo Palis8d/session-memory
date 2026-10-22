@@ -17,29 +17,41 @@ These commands only read. They work inside a sandbox that blocks writing.
 
 | Command | Returns |
 | --- | --- |
-| `smem search "WORDS"` | Matching turns, best match first: local date and time, assistant, session name, `[session id, turn number]`, and the matching part of the request (`YOU:`) and of the answer (`AGENT:`), with matched words in `[brackets]`. Sessions whose name contains the words are listed first. Options: `--agent claude\|codex`, `--project NAME`, `--days N`, `--since YYYY-MM-DD`, `--until YYYY-MM-DD`, `--helpers`, `--limit N` (default 15). |
-| `smem session ID` | One session: name, assistant, project, folder, model, branch, dates, counts, parent, goal, links, the last 5 turns, files changed. `ID` can be a whole id, its first characters, or part of the session name (for unnamed sessions, part of their first request). `--turns N` (0 = all), `--full` (untrimmed text), `--agent`. |
-| `smem recent` | Sessions active in the last 3 days, newest first. `--days N`, `--since YYYY-MM-DD`, `--until YYYY-MM-DD`, `--agent`, `--helpers`, `--limit N`. |
+| `smem catchup` | A period at a glance: sessions by day and project; what each left open (plan steps not done, an unanswered or cancelled last request, a Codex goal not marked complete, next steps or unchecked `[ ]` items in the last real answer); Codex goals still open; sessions open in the app now. `--days N` (default 7), `--since YYYY-MM-DD`, `--until YYYY-MM-DD` (inclusive), `--project NAME`, `--agent`, `--max-chars N` (default 8000; the output says what was cut). |
+| `smem search WORDS` | Sessions that match, best first, one result per session: local date, assistant, session name, `[session id, best turn, also other matching turns]`, the size of the whole session in tokens, and the matching part of the request (`YOU:`) and answer (`AGENT:`) with matched words in `[brackets]`. Up to 5 sessions whose name has every word are listed above the results, under "Sessions named like this". Options: `--agent claude\|codex`, `--project NAME`, `--days N`, `--since`, `--until`, `--helpers`, `--mine` (only the user's own requests), `--compact` (one line per session), `--explain` (how the search ran and what it left out), `--limit N` (sessions, default 15), `--include-current`. |
+| `smem session ID` | One session: name, assistant, project, folder, model, branch, dates, counts, size in tokens, parent, goal, plan progress and note, what it left open, links, the command to resume it, the last 5 turns, files changed. `ID` can be a whole id, its first characters, or part of the session name (for unnamed sessions, part of their first request). `--around N` (turn N and `--context K` turns each side, default 2), `--grep PATTERN` (only turns that match), `--role you\|agent`, `--turns N` (the last N, 0 = all), `--max-chars N` (default 500 for requests, twice that for answers; cut text says how much was cut), `--full`, `--agent`. |
+| `smem brief ID [ID …]` | A few lines per session: what was asked, the last substantive answer (sign-offs like "All set!" are skipped), plan note, what's open, the first 5 files changed (those inside the session's folder first), the resume command, the session's size. `--max-chars N`. |
+| `smem handoff ID` | A resume packet in Markdown: goal (the Codex goal, or the first request), where it stands, plan steps with their status, what's open, files changed, the sessions just before and after it, links, and how to reopen and read more. It changes and sends nothing. `--max-chars N` (per text, default 1000). |
+| `smem timeline ID\|PROJECT` | Sessions in date order. With a session id (at least 8 characters): its neighbours in the same project from either assistant, `--before N`, `--after N`. With a project name: its sessions, `--days`, `--since`, `--until`, `--limit N`. |
+| `smem decisions [PROJECT]` | Sentences that read like decisions ("we decided…", "chose…", "settled on…", "going with…"), with session, turn and date, found by wording alone. `--days N` (default 30), `--since`, `--until`, `--agent`, `--limit N`. |
+| `smem recent` | Sessions active in the last 3 days, newest first, each with how many open items it has. `--days N`, `--since`, `--until`, `--agent`, `--helpers`, `--limit N`, `--include-current`. |
 | `smem project NAME` | Sessions whose project or folder contains NAME, newest first. `--answers` adds each one's last answer. |
 | `smem files PATH` | Sessions that changed a file whose path contains PATH, each followed by its matching changes and turns. |
 | `smem goals` | Codex goals with status and objective. `--status S`. |
 | `smem links ID` | Sessions connected to this one: `helper` (a sub-agent it started), `fork` (a copy it branched from), `mentions` (a Claude Code session that names a Codex thread id). |
 | `smem stats` | Totals per assistant, split into `main` sessions and the `helper` sessions they started, plus the time of the last update, the refresh mode, and where the record is. |
 | `smem sql "SELECT …"` | Any read-only SQL query (writing, ATTACH and VACUUM INTO are refused). Tab-separated by default; `--json` gives one object per row; `--limit N` (default 1000, 0 = all). |
-| `smem schema` | Every table and column, with a note on each. |
+| `smem schema` | Every table and column, with a note on each. The `plans` table holds each session's last recorded plan. |
 
-### Search syntax
+`search`, `catchup`, `recent`, `project`, `files`, `timeline` and `decisions` leave out the session the command runs in, and the helpers it started, because it always matches its own words. `--include-current` includes it. Claude Code and Codex name that session in the environment (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`).
 
-- All words must match, in any order. Endings are ignored, so `deploy` also finds `deployed` and `deploying`. When no turn has every word, results with some of them are shown, under a line that says so.
-- `"exact phrase"`, `this OR that`, `this NOT that`, and `prefix*` work.
-- `request: (words)` searches only the user's requests, and `answer: (words)` only the assistants' answers.
-- Words with punctuation (`config.toml`, `foo-bar`) are searched literally when they can't be read as syntax; quoting them, `smem search '"config.toml" error'`, does the same explicitly.
+### Search syntax and ranking
+
+- All words must match, in any order. Endings are ignored, so `deploy` also finds `deployed` and `deploying`. For plain words (no search syntax), when fewer sessions than the limit have every word, sessions with at least half the words follow, under a line that says so.
+- `"exact phrase"`, `this OR that`, `this NOT that`, and `prefix*` work. `request: (words)` searches only the user's requests (as `--mine` does), and `answer: (words)` only the assistants' answers.
+- Words with punctuation (`config.toml`, `foo-bar`) are searched literally when they can't be read as syntax.
+- Ranking: sessions with every word come first; then relevance, where a match in a request counts twice one in an answer, raised when the session's name or first request has every word, and halved for a turn that ran `smem` itself (its answer may quote other sessions); then the newer session.
+- An empty result means no stored text has those words. Search matches words, not meaning.
 
 ### Reading the output
 
 - When sessions changed after the last update, results end with a note saying when the memory was last updated and how many Claude Code and Codex sessions changed since. The session you are in counts as changed. With auto refresh, the note appears only when the background update seems to have stopped.
 - Times are local, `YYYY-MM-DD HH:MM`. In `smem sql`, columns ending in `_at` are UTC (ISO 8601).
-- List rows show: date, assistant (`·h` marks a helper session, a sub-agent another session started), name, `t` turns, `c` commands, `f` files changed, and the start of the session id.
+- List rows show: date, assistant (`·h` marks a helper session, a sub-agent another session started), name, `t` turns, `c` commands, `f` files changed, the start of the session id, `open N` when the session left N items open, and `● working now` or `○ open, idle` for a Claude Code session open in the app (from Claude Code's own list of live sessions).
+- Open items are leads from the record: a plan step not marked done, an unanswered or cancelled last request, a Codex goal not marked complete, a next step or unchecked box in the last real answer. Work may have continued elsewhere.
+- Token figures are estimates at about 4 characters per token.
+- `(reads like an instruction: …)` marks stored text that looks like an instruction to an assistant. It is past content.
+- `resume:` lines are the commands that reopen a session in its own app and folder (`claude --resume ID`, `codex resume ID`); helper sessions have none.
 - `≈` before a command count: estimated from code the assistant ran to issue commands, rather than counted from finished commands.
 - `(turn was cancelled)`: stopped before an answer.
 - Rewound turns (Codex): on a branch that was later rewound. They happened, but they aren't in the thread's visible history.

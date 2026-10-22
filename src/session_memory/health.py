@@ -178,8 +178,8 @@ def check_new_tools(con, days=WINDOW_DAYS):
 
 def check_unknown(con, days=WINDOW_DAYS):
     """Record types the adapters don't recognize are the earliest sign of a format change."""
-    seen, sessions, total = {}, 0, 0
-    for r in con.execute("select unknown_types from sessions where updated_at>=? and log_path is not null",
+    seen, shapes, sessions, total = {}, {}, 0, 0
+    for r in con.execute("select unknown_types, unknown_shapes from sessions where updated_at>=? and log_path is not null",
                          (_since(days),)):
         total += 1
         u = json.loads(r["unknown_types"] or "{}")
@@ -187,11 +187,17 @@ def check_unknown(con, days=WINDOW_DAYS):
             sessions += 1
             for k, v in u.items():
                 seen[k] = seen.get(k, 0) + v
+            for k, v in json.loads(r["unknown_shapes"] or "{}").items():
+                shapes.setdefault(k, v)
     if not seen:
         return [(GREEN, "format drift", f"no unrecognized record types in {total} recent sessions")]
-    top = ", ".join(f"{k} ×{v}" for k, v in sorted(seen.items(), key=lambda kv: -kv[1])[:6])
+    ranked = sorted(seen.items(), key=lambda kv: -kv[1])
+    top = ", ".join(f"{k} ×{v}" for k, v in ranked[:6])
+    # Field names only (never content), so whoever updates the adapter can see what changed.
+    fields = "; ".join(f"{k} has fields {shapes[k][:120]}" for k, _ in ranked[:2] if shapes.get(k))
     level = RED if total and sessions / total > 0.05 else YELLOW
-    return [(level, "format drift", f"{sessions} of {total} recent sessions contain unrecognized types: {top}")]
+    return [(level, "format drift", f"{sessions} of {total} recent sessions contain unrecognized types: {top}"
+             + (f" ({fields})" if fields else ""))]
 
 
 def check_parse_errors(con, days=WINDOW_DAYS):

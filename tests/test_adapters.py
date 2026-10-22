@@ -291,7 +291,8 @@ def test_session_full_shows_everything():
                                     "turns": [_turn("x" * 120000 + "TAIL_SENTINEL", "done")], "files": {}})
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch.object(cli, "reader", lambda: con):
-            cli.cmd_session(type("A", (), {"id": "big", "agent": None, "turns": 0, "full": True})())
+            cli.cmd_session(type("A", (), {"id": "big", "agent": None, "turns": 0, "full": True, "grep": None,
+                                            "around": None, "context": 2, "role": None, "max_chars": 500})())
         assert "TAIL_SENTINEL" in out.getvalue()
 
 

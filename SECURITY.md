@@ -4,15 +4,21 @@ Session Memory keeps a searchable copy of your Claude Code and Codex history on 
 
 ## Promises, and the tests that check them
 
-Run all tests with `python3 -I tests/test_package.py`, `tests/test_adapters.py` and `tests/test_redaction.py`. Run `python3 -I tests/break_on_purpose.py` to break each key rule in a throwaway copy and confirm a test notices.
+Run every `tests/test_*.py` file with `python3 -I`; they also run on macOS and Linux for each push. Run `python3 -I tests/break_on_purpose.py` to break each key rule in a throwaway copy and confirm a test notices.
 
 | Promise | Checked by |
 | --- | --- |
 | It only reads the assistants' history. The one thing it adds in their folders is its own skill folder, and it never creates files in Codex's folder. | [`test_private_files_and_no_files_in_codex_folder`](tests/test_package.py), [`test_end_to_end_setup_read_only_use_and_uninstall`](tests/test_package.py), [`test_store_refuses_source_paths`](tests/test_adapters.py) |
 | The memory folder and files are readable only by your account. | [`test_private_files_and_no_files_in_codex_folder`](tests/test_package.py) |
 | Common forms of passwords, keys and tokens are replaced with `[REDACTED]` before anything is stored, and ordinary text is left alone. | [`test_review_cases_are_redacted`](tests/test_redaction.py), [`test_more_formats_are_redacted`](tests/test_redaction.py), [`test_ordinary_text_is_left_alone`](tests/test_redaction.py), [`test_adversarial_inputs_stay_fast`](tests/test_redaction.py) |
+| Secret redaction keeps working on random and hostile input: planted secrets are still removed, and no input takes longer than a second. | [`test_redaction_survives_random_input_and_still_removes_secrets`](tests/test_fuzz.py) |
 | Shell output and background-task notices in Claude Code logs aren't stored as your requests. | [`test_shell_output_and_notices_are_not_stored_as_requests`](tests/test_package.py) |
 | Reading never writes, so it works in an assistant's sandbox, and `smem sql` can't write, attach or copy files. | [`test_sql_can_only_read`](tests/test_package.py), [`test_end_to_end_setup_read_only_use_and_uninstall`](tests/test_package.py) |
+| Malformed logs and odd search text never crash the readers or search; a broken record is counted and skipped. | [`test_log_readers_never_crash_on_broken_logs`](tests/test_fuzz.py), [`test_search_never_crashes_on_odd_queries`](tests/test_fuzz.py) |
+| Text printed from the memory can't control your terminal: escape sequences, control characters and text-direction overrides are removed first. | [`test_terminal_escapes_and_bidi_overrides_are_removed`](tests/test_recall.py) |
+| Stored text that reads like an instruction to an assistant is marked as past content in results. | [`test_instruction_like_text_is_flagged_as_past_content`](tests/test_recall.py) |
+| `smem handoff` and the other reading commands change and send nothing. | [`test_handoff_is_complete_and_changes_nothing`](tests/test_recall.py), [`test_end_to_end_setup_read_only_use_and_uninstall`](tests/test_package.py) |
+| A health warning about an unknown log record names its fields, never its content. | [`test_unknown_records_report_their_field_names_never_content`](tests/test_recall.py) |
 | Excluded folders match exactly (not similarly named folders), apply to sessions already stored, and are erased from the file, not just hidden. | [`test_exclusions_are_exact_complete_and_erased`](tests/test_package.py) |
 | `smem forget` erases a session for good, only after a yes, and updates don't bring it back. | [`test_forget_erases_for_good_and_can_be_undone`](tests/test_package.py) |
 | An unplugged drive is never taken for deletion: nothing is removed, and health raises an alarm. | [`test_unplugged_drive_is_not_taken_for_deletion`](tests/test_package.py), [`test_full_rebuild_failure_keeps_store`](tests/test_adapters.py) |
@@ -27,7 +33,7 @@ Run all tests with `python3 -I tests/test_package.py`, `tests/test_adapters.py` 
 - **Protects against** common secret formats being stored: they're redacted first. This is best effort, and a secret in an unusual format can get through.
 - **Protects against** smem changing your assistants' history or deleting anything it didn't create.
 - **Doesn't protect against** software running as your own account. Anything that can read your files can read the memory, just as it can read the logs themselves.
-- **Doesn't protect against** what assistants do with results: text they read from the memory goes to their provider like anything else they read, and old session text could contain instructions. The skill tells assistants that results are past records, but it can't guarantee an assistant ignores them.
+- **Doesn't protect against** what assistants do with results: text they read from the memory goes to their provider like anything else they read, and old session text could contain instructions. Results mark text that reads like an instruction, and the skill tells assistants that results are past records, but neither can guarantee an assistant ignores them. The marking goes by wording, so an instruction phrased another way isn't marked.
 
 ## Reporting a problem
 
