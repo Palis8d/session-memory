@@ -31,4 +31,4 @@ Run all tests with `python3 -I tests/test_package.py`, `tests/test_adapters.py` 
 
 ## Reporting a problem
 
-Please open an issue at https://github.com/Palis8d/session-memory/issues. For anything sensitive, say so in a short issue without the details, and we'll arrange a private channel.
+For a security or privacy problem, please report it privately: on the repository's **Security** tab, choose **Report a vulnerability** (https://github.com/Palis8d/session-memory/security/advisories/new). Only you and the maintainer see the report. For anything else, open an issue at https://github.com/Palis8d/session-memory/issues.
