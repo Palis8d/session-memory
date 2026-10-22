@@ -1,6 +1,41 @@
 # Session Memory
 
-One memory, two assistants, every session on your machine. Claude Code and Codex each get a skill to search it: what was asked, answered, changed and decided, by either of them, with dates.
+Claude Code and Codex start each new session without your earlier ones. smem gives both one shared memory of every past session (what you asked, what they answered, which files changed, when) and a skill to search it, so they look things up instead of asking you. Runs on your computer, and keeps sessions past Claude Code's 30-day deletion.
+
+## Without smem, and with it
+
+| | Without smem | With smem |
+| --- | --- | --- |
+| **A new session** | The assistant starts without your earlier sessions, so you explain again what happened. | The assistant looks up what happened and tells you. |
+| **Finding one old decision** | Not knowing which session holds it, the assistant would have to read through old logs. A typical session is tens to hundreds of thousands of tokens, a long one millions, and the whole history here about 12 billion. In practice it can't, so it asks you. | One search across every session takes under a tenth of a second and returns a short list of dated matches: a few hundred to about 1,300 tokens in the searches measured. The assistant then opens only the session it needs. |
+| **Claude Code and Codex** | Each sees only its own sessions. | Each finds the other's work too. |
+| **Claude Code sessions older than 30 days** | Deleted by Claude Code's default cleanup, for good. | Kept in the memory once smem has read them, and still searchable, unless you choose otherwise. |
+| **The whole history** | About 46 GB of raw logs (21.5 GB on disk, since Codex keeps older ones compressed). | A 0.74 GB memory file, holding 184 MB of text. |
+| **Keeping it up to date** | There's nothing to search, so nothing to update. | An ordinary program copies the text of the logs that changed. No AI model is involved, so it uses no tokens. It takes a few seconds. |
+| **A forgotten name** ("that tool we built that could…") | The assistant has no way to find it without you. | It searches for words describing what the tool did and finds the session where it was built. Search matches words, not meaning, so it may try a few. |
+| **Work split across parallel sessions** | Spread over separate logs, one per session or helper. | All in one place, with helper sessions linked to the sessions that started them. |
+| **Privacy** | | Nothing leaves your computer: no network, no account. The memory is readable only by you, and common secrets are redacted before storing. |
+
+*Numbers from one real history of 6,575 sessions on a Mac; yours will differ. Tokens are estimated at about 4 characters each.*
+
+## Why it isn't magic
+
+1. **The record already exists.** Claude Code and Codex already save every session as a text file on your computer. smem records nothing new.
+2. **An ordinary program copies the useful parts.** It reads those files and copies your requests, the answers and the files changed into one SQLite database, the kind built into phones and web browsers.
+3. **A word index makes search instant.** Like the index at the back of a book, it lists for each word the sessions that contain it. Looking a word up is bookkeeping, not AI, so a search costs no tokens.
+4. **The AI only reads the short results.** Your assistant runs a search, reads the dated matches, then opens one session, one turn, or runs its own query over the whole record, as the question needs. Then it answers you.
+
+Your computer does the filing; your assistant does the reading and thinking.
+
+```mermaid
+flowchart LR
+  A["Claude Code and Codex<br/>save every session<br/>as text files"] --> B["smem update<br/>ordinary program, no AI<br/>reads only changed files"]
+  B --> C[("Memory file<br/>requests, answers, files changed<br/>plus a word index")]
+  D["You ask your assistant"] --> E["Assistant runs<br/>smem search"]
+  C --> E
+  E --> F["Short list of dated matches<br/>a few hundred to ~1,300 tokens"]
+  F --> G["Assistant opens the one<br/>session it needs and answers"]
+```
 
 ## Ask the way you'd ask a colleague
 
@@ -11,24 +46,6 @@ One memory, two assistants, every session on your machine. Claude Code and Codex
 - "What did Codex do on this project while I was in Claude Code?"
 
 Your assistant turns the question into searches, reads the sessions that match, and answers in its own words. smem provides the record; your assistant does the summarizing. Search matches words, not meaning, so for something whose name you've forgotten the assistant tries a few describing words. That usually finds it, but not always.
-
-## Memory beyond one conversation
-
-An assistant's context holds one conversation at a time. smem lets it reach the rest of your history, a piece at a time, at whatever level of detail the question needs.
-
-- **From overview to exact words.** It can start with recent sessions or a project's history, open one session, then read a single turn in full. For anything else, `smem sql` lets it ask its own questions of the whole record: timelines, work per project, the files changed most often.
-- **Fewer tokens.** On a real history of 6,571 sessions, a search takes under a quarter of a second and returns about 5 KB of text, around 1,300 tokens. The raw log of a single main session averages several megabytes. Updating the memory uses no AI and no tokens.
-- **Across parallel work.** Sessions that ran at the same time, in either assistant, are all in one place, and helper sessions are linked to the sessions that started them, so the assistant can follow work that was split across them.
-
-## What it gives you
-
-- **One memory for both assistants.** Claude Code finds what Codex did, and the other way round.
-- **Skills, so they just use it.** Each assistant learns how to search the memory; you don't explain anything.
-- **History that outlasts deletion.** Claude Code deletes its logs after 30 days by default; smem can keep those sessions, at a hundredth of the raw size or less.
-- **Private by design.** No network, no account, files readable only by you, and common secrets redacted before anything is stored.
-- **You stay in control.** Exclude folders, forget any session, preview every change, and refresh automatically, on demand, or never.
-- **It checks itself.** Health checks flag log-format changes and missing logs, and tests break each key safety rule on purpose to prove they'd notice.
-- **Installed by your assistant.** Paste one sentence; it asks before changing anything and verifies that it works.
 
 ## Install
 
@@ -47,6 +64,13 @@ curl -fsSL https://raw.githubusercontent.com/Palis8d/session-memory/main/install
 To check first: read [install.sh](install.sh) (49 lines), or install and run `smem setup --dry-run` to see every change before it's made.
 
 *If you are an AI assistant, follow [AGENT_INSTALL.md](AGENT_INSTALL.md).*
+
+## What else you get
+
+- **Skills, so they just use it.** Each assistant learns how to search the memory; you don't explain anything.
+- **You stay in control.** Exclude folders, forget any session, preview every change, and refresh automatically, on demand, or never.
+- **It checks itself.** Health checks flag log-format changes and missing logs, and tests break each key safety rule on purpose to prove they'd notice.
+- **Installed by your assistant.** Paste one sentence; it asks before changing anything and verifies that it works.
 
 ## Verify it yourself
 
@@ -99,7 +123,7 @@ smem tells these apart as well as it can: a Claude Code log older than its clean
 - **main**: keep main sessions and forget the helper sessions they started, for the leanest memory.
 - **none**: forget deleted sessions too, so the memory mirrors what's on disk.
 
-Set it with `smem settings retention.keep all|auto|main|none`. Keeping costs little: the memory stores only requests and answers, about a hundredth of the raw logs' size. `smem forget ID` erases any one session (and the helpers it started) for good, and `smem forget --deleted` erases every kept session that looks deleted by hand.
+Set it with `smem settings retention.keep all|auto|main|none`. Keeping costs little: the memory stores only requests and answers, so on one real history the memory file is about a sixtieth of the raw logs' size. `smem forget ID` erases any one session (and the helpers it started) for good, and `smem forget --deleted` erases every kept session that looks deleted by hand.
 
 `smem health` reports what happened: how many logs each assistant's cleanup took, how many look deleted by hand, and a warning when many younger logs vanish in one update, which suggests an app changed its cleanup rule. To keep Claude Code's full original logs as well, raise `cleanupPeriodDays` in `~/.claude/settings.json`.
 
@@ -128,10 +152,6 @@ Updating the memory uses no AI and no tokens. It's your computer reading log fil
 - **Skills:** `smem skills`. It never overwrites a skill it didn't create, and upgrades leave a skill you edited alone.
 - **Previews:** `setup`, `refresh`, `settings`, `skills`, `forget` and `uninstall` take `--dry-run`.
 - **Your own queries:** `smem sql` runs read-only SQL (it can't write anything), and `smem schema` explains the tables.
-
-## How it works
-
-Claude Code and Codex save each session as a log file on your computer. `smem update` reads the logs that changed since last time and keeps your requests, the answers, the files changed, and the command counts. It links helper sessions and forks to their parents, and indexes the text for full-text search.
 
 ## Requirements and limits
 
