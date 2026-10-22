@@ -25,6 +25,8 @@ Or, in a terminal:
 curl -fsSL https://raw.githubusercontent.com/Palis8d/session-memory/main/install.sh | sh
 ```
 
+To check first: read [install.sh](install.sh) (49 lines), or install and run `smem setup --dry-run` to see every change before it's made.
+
 *If you are an AI assistant, follow [AGENT_INSTALL.md](AGENT_INSTALL.md).*
 
 ## What you get
@@ -37,9 +39,33 @@ curl -fsSL https://raw.githubusercontent.com/Palis8d/session-memory/main/install
 ## Built with care
 
 - **Stays on your computer.** No network, no account, no telemetry. Your history is only read, and the memory file is readable only by your account.
-- **Secrets are removed before storing.** Common forms of passwords, keys and tokens are replaced with `[REDACTED]`, checked against 99 realistic fake secrets.
-- **Asks before it changes anything.** Installing through your assistant starts with a question to you. Setup, refresh, settings, skills and uninstall can all show what they would do first (`--dry-run`), and uninstall removes only what smem created.
-- **Tested on real use.** Built and checked against a real history of more than 6,000 sessions: the first build takes about two minutes, and later updates about two seconds. 68 automated tests run on Python 3.11 to 3.14.
+- **Secrets are removed before storing.** Common forms of passwords, keys and tokens are replaced with `[REDACTED]`. The tests check 124 realistic fake secrets, and 87 ordinary snippets that must stay unchanged.
+- **Asks before it changes anything.** Installing through your assistant starts with a question to you. Setup, refresh, settings, skills, forget and uninstall can all show what they would do first (`--dry-run`), and uninstall removes only what smem created.
+- **Tested on real use.** Built and checked against a real history of more than 6,000 sessions: the first build takes about two minutes, and later updates a few seconds. 68 automated tests run on Python 3.11 to 3.14.
+
+## Verify it yourself
+
+```bash
+smem health --selftest      # the checks catch 5 kinds of breakage in built-in samples, and stay quiet in 2 normal ones
+smem setup --dry-run        # every change setup would make, without making it
+```
+
+And in a copy of this repository, this prints nothing, because no file imports a network library:
+
+```bash
+grep -rnE "^\s*(import|from)\s+(socket|ssl|http|urllib\.request|urllib3|requests|httpx|aiohttp|ftplib|smtplib|xmlrpc|websocket)" src/
+```
+
+The only other programs smem starts are `launchctl` or `systemctl` (for auto refresh) and `zstd` (to read compressed Codex logs, when Python can't).
+
+## How it was tested before release
+
+- **A fresh install by an AI agent** that knew nothing about the project, in a clean throwaway home, following only this README and [AGENT_INSTALL.md](AGENT_INSTALL.md). It then used smem to answer questions about sample history.
+- **Two separate AI reviews**, one for correctness and one for privacy and security. Each finding was reproduced before it was fixed.
+- **Every key safety rule broken on purpose**, one at a time, to confirm a test notices. All 21 breaks are caught; rerun them with `python3 -I tests/break_on_purpose.py` (a few minutes).
+- **A real history of more than 6,000 Claude Code and Codex sessions**, read-only, into a throwaway folder.
+
+[SECURITY.md](SECURITY.md) lists each safety promise with the test that proves it, and what smem does and doesn't protect against.
 
 ## Use it
 
@@ -105,7 +131,7 @@ Claude Code and Codex save each session as a log file on your computer. `smem up
 ## How it's checked
 
 - `smem health` checks that the memory is current, that every log on disk is in it, that counts match Codex's own index, and that the log formats haven't changed.
-- `smem health --selftest` shows the checks catching five kinds of log-format change in built-in sample logs, and staying quiet in two normal situations.
+- `smem health --selftest` shows the checks catching five kinds of breakage in built-in sample logs (four log-format changes, and logs vanishing from disk), and staying quiet in two normal situations.
 - 68 automated tests run on Python 3.11 to 3.14.
 
 ## Requirements and limits

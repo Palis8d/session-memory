@@ -1,2 +1,2 @@
-include AGENT_INSTALL.md install.sh LICENSE README.md
+include AGENT_INSTALL.md install.sh LICENSE README.md SECURITY.md
 recursive-include tests *.py

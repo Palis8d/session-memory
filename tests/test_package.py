@@ -207,6 +207,9 @@ def test_background_job_files_and_commands():
     assert os.environ["SESSION_MEMORY_HOME"] in text and os.environ["SESSION_MEMORY_CONFIG"] in text
     assert ("1200" in text) if kind == "launchd" else ("20min" in text)
     assert not any(os.path.exists(p) for p, _ in files)  # a dry run writes nothing
+    assert all(p.startswith(os.environ["HOME"] + os.sep) or p.startswith(os.environ["XDG_CONFIG_HOME"] + os.sep)
+               for p, _ in files)  # the job's files live in your own folders
+    assert all("sudo" not in c and ("--user" in c or any(str(x).startswith("gui/") for x in c)) for c in on), on
     assert schedule.disable() == (kind, [], [])  # nothing installed: nothing done, no command run
     schedule.RAN.clear()
     schedule.enable(20)
@@ -254,7 +257,7 @@ def test_skills_install_remove_and_never_touch_others():
         assert body.startswith("---\nname: smem\n") and "allowed-tools:" in body and "{{" not in body
         front = body.split("---")[1]
         assert " search:*" in front and " update)" in front  # reading and a plain update run without asking
-        for cmd in ("update", "uninstall", "settings", "setup", "refresh", "skills"):
+        for cmd in ("update", "uninstall", "settings", "setup", "refresh", "skills", "forget"):
             assert f" {cmd}:*" not in front, cmd  # changing the user's setup still asks
         assert "Bash(" not in skills.render("codex")
         assert skills.remove("codex")[0] is False and os.path.exists(other)
@@ -477,7 +480,7 @@ def test_sql_can_only_read():
 
 
 def test_private_files_and_no_files_in_codex_folder():
-    old = os.umask(0o077)
+    old = os.umask(0o022)  # the common default, which leaves new files readable by everyone: smem must not
     try:
         with tempfile.TemporaryDirectory() as tmp:
             os.chmod(tmp, 0o755)
