@@ -4,6 +4,12 @@ One searchable memory of your Claude Code and Codex sessions, kept on your own c
 
 Ask your assistant "what did we decide about the login page last week?" or "which session changed `config.toml`?" and it can look it up, across every Claude Code session and Codex thread on this computer.
 
+## Why it helps
+
+- **Each new session starts blank.** Earlier decisions, fixes and the reasons behind them sit in old logs that nobody reads. With smem, your assistant can look them up.
+- **Claude Code and Codex don't see each other's work.** smem gives them one shared memory.
+- **Old logs are long and costly to read.** Searching the memory returns a short list of matching moments, with dates, so an assistant reads only the session it needs. That saves time and tokens.
+
 ## Install
 
 Paste this into Claude Code or Codex:
@@ -26,6 +32,13 @@ curl -fsSL https://raw.githubusercontent.com/Palis8d/session-memory/main/install
 - **Skills for Claude Code and Codex**, so each assistant knows how to use the memory without you explaining it.
 - **Stays current your way:** automatically every 15 minutes, only when needed, or never. See below.
 - **Health checks** that notice when Claude Code or Codex change how they write their logs, so the memory doesn't quietly fall behind.
+
+## Built with care
+
+- **Stays on your computer.** No network, no account, no telemetry. Your history is only read, and the memory file is readable only by your account.
+- **Secrets are removed before storing.** Common forms of passwords, keys and tokens are replaced with `[REDACTED]`, checked against 99 realistic fake secrets.
+- **Asks before it changes anything.** Installing through your assistant starts with a question to you. Setup, refresh, settings, skills and uninstall can all show what they would do first (`--dry-run`), and uninstall removes only what smem created.
+- **Tested on real use.** Built and checked against a real history of more than 6,000 sessions: the first build takes about two minutes, and later updates about two seconds. 63 automated tests run on Python 3.11 to 3.14.
 
 ## Use it
 
