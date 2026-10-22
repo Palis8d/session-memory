@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "session-memory"
+dynamic = ["version"]
+description = "One searchable memory of your Claude Code and Codex sessions, kept on your own computer."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Palis8d" }]
+keywords = ["claude-code", "codex", "agents", "memory", "search", "sqlite"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "zstandard>=0.22; python_version < '3.14'",  # Codex compresses older logs; Python 3.14 reads them itself
+]
+
+[project.urls]
+Homepage = "https://github.com/Palis8d/session-memory"
+
+[project.scripts]
+smem = "session_memory.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "session_memory.__version__" }
+
+[tool.setuptools.package-data]
+session_memory = ["selftest/*.jsonl", "selftest/segments/*.jsonl", "skill_templates/*.md"]

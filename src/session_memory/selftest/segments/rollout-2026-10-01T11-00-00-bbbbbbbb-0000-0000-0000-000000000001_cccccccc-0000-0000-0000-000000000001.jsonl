@@ -1,0 +1,6 @@
+{"timestamp":"2026-10-01T11:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"bbbbbbbb-0000-0000-0000-000000000001","cwd":"/tmp/demo"}}
+{"timestamp":"2026-10-01T10:00:04.000Z","ordinal":5,"type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-10-01T10:00:04.000Z","ordinal":6,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"Second request"}]}}}
+{"timestamp":"2026-10-01T11:00:01.000Z","ordinal":7,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["pwd"]}}}
+{"timestamp":"2026-10-01T11:00:02.000Z","ordinal":8,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["date"]}}}
+{"timestamp":"2026-10-01T11:00:03.000Z","ordinal":9,"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Second answer"}}

@@ -1,0 +1,41 @@
+{"timestamp": "2026-10-01T10:00:00Z", "type": "session_meta", "payload": {"id": "aaaaaaaa-0000-0000-0000-000000000007"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "content": [{"type": "text", "text": "ask 0"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 0"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 0"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 1"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 1"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 1"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 2"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 2"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 2"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 3"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 3"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 3"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 4"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 4"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 4"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 5"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 5"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 5"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 6"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 6"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 6"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 7"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 7"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 7"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 8"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 8"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 8"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "body": "ask 9"}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "text", "text": "answer 9"}]}}}
+{"timestamp": "2026-10-01T10:00:00Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "answer 9"}}

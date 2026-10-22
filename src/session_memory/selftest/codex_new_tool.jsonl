@@ -1,0 +1,6 @@
+{"timestamp":"2026-10-01T10:00:00.000Z","type":"session_meta","payload":{"id":"aaaaaaaa-0000-0000-0000-000000000005","cwd":"/tmp/demo"}}
+{"timestamp":"2026-10-01T10:00:01.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-10-01T10:00:01.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"List the files"}]}}}
+{"timestamp":"2026-10-01T10:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"run_terminal","arguments":"{\"cmd\":\"ls\"}"}}
+{"timestamp":"2026-10-01T10:00:03.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","content":[{"type":"Text","text":"Three files."}]}}}
+{"timestamp":"2026-10-01T10:00:03.000Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Three files."}}

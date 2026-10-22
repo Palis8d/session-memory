@@ -1,0 +1,7 @@
+{"timestamp":"2026-10-01T10:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"bbbbbbbb-0000-0000-0000-000000000001","cwd":"/tmp/demo"}}
+{"timestamp":"2026-10-01T10:00:01.000Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-10-01T10:00:01.000Z","ordinal":2,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"First request"}]}}}
+{"timestamp":"2026-10-01T10:00:02.000Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["ls"]}}}
+{"timestamp":"2026-10-01T10:00:03.000Z","ordinal":4,"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"First answer"}}
+{"timestamp":"2026-10-01T10:00:04.000Z","ordinal":5,"type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-10-01T10:00:04.000Z","ordinal":6,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"Second request"}]}}}
