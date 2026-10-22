@@ -60,36 +60,62 @@ def data_dir():
 
 
 def _merge(base, extra):
+    """Defaults overlaid with the user's values. Unknown names are reported, not silently ignored: a typo
+    in a privacy setting would otherwise leave a folder unprotected."""
     out = copy.deepcopy(base)
     for section, values in (extra or {}).items():
-        if isinstance(values, dict) and isinstance(out.get(section), dict):
-            for k, v in values.items():
-                if k in out[section]:
-                    out[section][k] = v
+        if not isinstance(values, dict) or not isinstance(out.get(section), dict):
+            raise SystemExit(f"Settings: unknown section [{section}]. File: {config_path()}")
+        for k, v in values.items():
+            if k not in out[section]:
+                raise SystemExit(f"Settings: unknown setting {section}.{k}; `smem settings` lists the names. "
+                                 f"File: {config_path()}")
+            out[section][k] = v
     return out
 
 
 def load(reload=False):
-    """Current settings: defaults overlaid with the user's file (unknown keys are ignored)."""
+    """Current settings: defaults overlaid with the user's file."""
     global _cache
     if _cache is not None and not reload:
         return _cache
     user = {}
     path = config_path()
     if os.path.exists(path):
-        with open(path, "rb") as f:
-            user = tomllib.load(f)
+        try:
+            with open(path, "rb") as f:
+                user = tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            raise SystemExit(f"Settings file can't be read ({e}). Fix or delete it: {path}")
     _cache = validate(_merge(DEFAULTS, user))
     return _cache
 
 
+def _kind(v):
+    return "true/false" if isinstance(v, bool) else "a whole number" if isinstance(v, int) else \
+        "a list of text" if isinstance(v, list) else "text"
+
+
 def validate(cfg):
+    """Every value must have its default's type; lists hold text; folders to exclude are absolute."""
+    where = f" File: {config_path()}"
+    for section, values in DEFAULTS.items():
+        for k, default in values.items():
+            v = cfg[section][k]
+            ok = isinstance(v, type(default)) and not (isinstance(v, bool) and not isinstance(default, bool))
+            if ok and isinstance(default, list):
+                ok = all(isinstance(x, str) and x.strip() for x in v)
+            if not ok:
+                raise SystemExit(f"Settings: {section}.{k} must be {_kind(default)}, not {v!r}.{where}")
     mode = cfg["refresh"]["mode"]
     if mode not in ("auto", "manual", "off"):
-        raise SystemExit(f"Settings: refresh.mode must be auto, manual or off (it is {mode!r}). File: {config_path()}")
-    minutes = cfg["refresh"]["interval_minutes"]
-    if not isinstance(minutes, int) or minutes < 5:
-        raise SystemExit(f"Settings: refresh.interval_minutes must be a whole number of at least 5. File: {config_path()}")
+        raise SystemExit(f"Settings: refresh.mode must be auto, manual or off (it is {mode!r}).{where}")
+    if cfg["refresh"]["interval_minutes"] < 5:
+        raise SystemExit(f"Settings: refresh.interval_minutes must be at least 5.{where}")
+    for p in cfg["privacy"]["exclude_paths"]:
+        if not (p.startswith("/") or p.startswith("~")):
+            raise SystemExit(f"Settings: privacy.exclude_paths needs full folder paths (starting with / or ~), "
+                             f"not {p!r}.{where}")
     return cfg
 
 
@@ -109,7 +135,8 @@ def save(cfg):
     cfg = validate(cfg)
     path = config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    lines = ["# Settings for smem (Session Memory). Edit freely; `smem settings` shows the result.", ""]
+    lines = ["# Settings for smem (Session Memory). Edit values freely; `smem settings` shows the result.",
+             "# `smem settings KEY VALUE` and `smem setup` rewrite this file, so comments you add aren't kept.", ""]
     for section, values in cfg.items():
         lines.append(f"# {COMMENTS.get(section, '')}")
         lines.append(f"[{section}]")
@@ -117,7 +144,7 @@ def save(cfg):
             lines.append(f"{k} = {_toml_value(v)}")
         lines.append("")
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
         f.write("\n".join(lines))
     os.replace(tmp, path)
     _cache = cfg
@@ -134,11 +161,8 @@ def set_value(dotted, raw):
         value = tomllib.loads(f"v = {raw}")["v"]
     except tomllib.TOMLDecodeError:
         value = raw  # plain words are taken as text
-    expected = type(DEFAULTS[section][key])
-    if not isinstance(value, expected) or (expected is int and isinstance(value, bool)):
-        raise SystemExit(f"{dotted} must be {expected.__name__}, not {type(value).__name__}.")
     cfg[section][key] = value
-    return save(cfg)
+    return save(cfg)  # validates first; a refused value leaves the file as it was
 
 
 def codex_home(cfg=None):

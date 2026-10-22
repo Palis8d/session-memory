@@ -6,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import re
 import sqlite3
+import sys
 
 from . import claude, codex, config, store
 
@@ -31,6 +32,15 @@ def _parse_claude(args):
 
 
 def _sig(paths):
+    """None when a log vanished since the scan (Codex moves logs when it archives a session): skipped this
+    run, read at its new place next time."""
+    try:
+        return _sig_of(paths)
+    except FileNotFoundError:
+        return None
+
+
+def _sig_of(paths):
     # The adapter version is part of the signature, so a parsing change re-reads every log.
     return f"v{codex.ADAPTER_VERSION}|" + "|".join(codex.log_sig(p) for p in paths)
 
@@ -92,25 +102,37 @@ def _check_shrink(previous, new, agent, stats, accept_removals, ignore=()):
         stats[f"{agent}_removed"] = len(lost)
 
 
+# macOS and Windows folders ignore letter case by default, so exclusions must too.
+_FOLD = (lambda s: s.casefold()) if sys.platform in ("darwin", "win32") else (lambda s: s)
+
+
 def _excluder(cfg):
-    """A test for sessions the user has excluded by folder or project name."""
-    paths = [os.path.realpath(os.path.expanduser(p)).rstrip("/") for p in cfg["privacy"]["exclude_paths"]]
-    projects = {p.lower() for p in cfg["privacy"]["exclude_projects"]}
+    """A test for sessions the user has excluded by folder or project name. A folder matches itself and
+    everything inside it (not siblings that merely share a prefix), by its written and its resolved path."""
+    paths = []
+    for p in cfg["privacy"]["exclude_paths"]:
+        p = os.path.abspath(os.path.expanduser(p))
+        paths += {_FOLD(p.rstrip("/") or "/"), _FOLD(os.path.realpath(p).rstrip("/") or "/")}
+    projects = {p.casefold() for p in cfg["privacy"]["exclude_projects"]}
+
+    def inside(folder):
+        return any(folder == p or folder.startswith(p.rstrip("/") + "/") for p in paths)
 
     def excluded(cwd, project=None):
         cwd = (cwd or "").replace("file://", "").rstrip("/")
-        if cwd and any(cwd == p or cwd.startswith(p + "/") for p in paths):
+        if cwd and paths and (inside(_FOLD(cwd)) or inside(_FOLD(os.path.realpath(cwd)))):
             return True
-        return bool(project) and project.lower() in projects
+        return bool(project) and project.casefold() in projects
     return excluded, paths
 
 
 def _claude_dir_excluded(path, excluded_paths):
     """Claude names each project folder after its working folder (non-alphanumerics become '-'), so an
-    excluded folder can be skipped before its logs are opened."""
+    excluded folder's own logs can be skipped before they're opened. Only an exact match counts: the name
+    doesn't show where folder names end, so sessions in subfolders are caught later by their recorded cwd."""
     folder = os.path.basename(os.path.dirname(path) if "/subagents/" not in path
                               else os.path.dirname(os.path.dirname(os.path.dirname(path))))
-    return any(folder.startswith(re.sub(r"[^A-Za-z0-9]", "-", p)) for p in excluded_paths)
+    return any(_FOLD(folder) == re.sub(r"[^A-Za-z0-9]", "-", p) for p in excluded_paths)
 
 
 def _drop(con, agent, ids, stats, key):
@@ -176,6 +198,9 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
                 stats["codex_meta_only"] += 1
             continue
         sig = _sig(paths)  # taken before reading, so bytes appended during the parse get re-read next time
+        if sig is None:
+            stats["moved_during_update"] = stats.get("moved_during_update", 0) + 1
+            continue
         rec["log_path"] = paths[-1]
         if sigs.get(tid) == sig:
             _refresh_metadata(con, rec)
@@ -189,7 +214,11 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
     for tid in log_only:
         paths = on_disk[tid]
         sig = _sig(paths)
+        if sig is None:
+            stats["moved_during_update"] = stats.get("moved_during_update", 0) + 1
+            continue
         if sigs.get(tid) == sig:
+            stats["codex_unchanged"] += 1
             continue
         recs[tid] = {"agent": "codex", "session_id": tid, "kind": "top", "origin": "log-only",
                      "log_path": paths[-1], "log_sig": sig}
@@ -279,7 +308,11 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
     csigs = {} if full else _stored_sigs(con, "claude")
     ctodo = []
     for a in logs:
-        sig = claude.log_sig(a[0])  # before reading; see the Codex note above
+        try:
+            sig = claude.log_sig(a[0])  # before reading; see the Codex note above
+        except FileNotFoundError:  # removed since the scan: skipped this run
+            stats["moved_during_update"] = stats.get("moved_during_update", 0) + 1
+            continue
         if csigs.get(a[1]) != sig:
             ctodo.append((a, sig))
     presig = {a[1]: s for a, s in ctodo}
@@ -325,6 +358,12 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
         old = previous.execute("select value from meta where key='inventory'").fetchone()
         if old:
             con.execute("insert or replace into meta values ('inventory', ?)", (old[0],))
+    # Sessions stored before a folder or project was excluded, whatever their log's state.
+    for agent, ids in (("codex", skipped), ("claude", cskipped)):
+        late = {r[0] for r in con.execute("select session_id, cwd, project from sessions where agent=?", (agent,))
+                if excluded(r[1], r[2])}
+        _drop(con, agent, late, stats, "excluded_removed")
+        ids |= late
     # Sessions skipped by the user's exclusions, so health doesn't report them as missing.
     con.execute("insert or replace into meta values ('excluded', ?)",
                 (json.dumps({"codex": sorted(skipped), "claude": sorted(cskipped)}),))
@@ -334,6 +373,8 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
                 (started, store.now_iso(), "full" if full else "incremental", json.dumps(stats)))
     con.execute("insert or replace into meta values ('last_update', ?)", (store.now_iso(),))
     con.commit()
+    if any(k in stats for k in ("excluded_removed", "codex_source_off_removed", "claude_source_off_removed")):
+        store.purge_deleted(con)  # removed for privacy: erase the text from the file too, not just the index
     return stats
 
 

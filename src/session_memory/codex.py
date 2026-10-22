@@ -10,14 +10,15 @@ import json
 import os
 import re
 import sqlite3
+import urllib.parse
 from collections import Counter
 
 CODEX_HOME = os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")  # see config.codex_home
 EXTRA_LOG_DIRS = []  # extra folders under CODEX_HOME holding rollout logs (settings: sources.codex_extra_log_dirs)
 LOG_DIRS = ("sessions", "archived_sessions")  # where Codex itself keeps rollout logs
-ADAPTER_VERSION = 8  # bump when parsing changes so `smem update` re-reads every Codex log
+ADAPTER_VERSION = 9  # bump when parsing changes so `smem update` re-reads every Codex log
 
-# Every record type seen in a census of 500 logs (Feb–Oct 2026). Anything else is reported as unknown,
+# Every record type seen in a broad sample of real logs. Anything else is reported as unknown,
 # which is how `smem health` notices a format change on the day it happens.
 KNOWN_TOP = {"session_meta", "event_msg", "response_item", "world_state", "turn_context",
              "token_usage_record", "compacted", "inter_agent_communication_metadata"}
@@ -41,17 +42,17 @@ ROLLOUT_RE = re.compile(r"rollout-[0-9T:-]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}
 
 
 def ro(db):
-    """Read-only, WAL-aware connection. Falls back to an immutable read only when the database has no
-    pending write-ahead log, since immutable mode would silently ignore committed WAL contents."""
+    """Read-only connection that never creates a file in Codex's folder. With no pending write-ahead log
+    (Codex isn't writing), the database is read as immutable, which needs no -wal/-shm files. While Codex
+    is writing, its own -wal/-shm already exist and a normal read-only open shares them."""
     path = os.path.join(CODEX_HOME, db)
-    try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        con.execute("select 1 from sqlite_master limit 1")
-    except sqlite3.OperationalError:
-        wal = path + "-wal"
-        if os.path.exists(wal) and os.path.getsize(wal) > 0:
-            raise
-        con = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)  # never creates a file
+    if not os.path.exists(path):
+        raise sqlite3.OperationalError(f"unable to open database file: {path}")
+    uri = "file:" + urllib.parse.quote(path)
+    wal = path + "-wal"
+    pending = os.path.exists(wal) and os.path.getsize(wal) > 0
+    con = sqlite3.connect(uri + ("?mode=ro" if pending else "?mode=ro&immutable=1"), uri=True)
+    con.execute("select 1 from sqlite_master limit 1")
     con.row_factory = sqlite3.Row
     return con
 
@@ -187,12 +188,21 @@ def scan_rollouts():
     """Every rollout file on disk, grouped by thread id. Long threads are split into consecutive
     segments (`rollout-<ts>-<thread>_<segment>.jsonl`); sorting by file name puts them in order."""
     import glob
-    by_thread = {}
+    by_thread, seen = {}, set()
     for root in tuple(LOG_DIRS) + tuple(EXTRA_LOG_DIRS):
         for f in glob.glob(os.path.join(CODEX_HOME, root, "**", "rollout-*.jsonl*"), recursive=True):
             m = ROLLOUT_RE.search(os.path.basename(f))
-            if m:
-                by_thread.setdefault(m.group(1), []).append(f)
+            if not m:
+                continue
+            if os.path.islink(f):  # a link is the file it points to: skip it when that's gone or already found
+                f = os.path.realpath(f)
+                if not os.path.isfile(f) or not ROLLOUT_RE.search(os.path.basename(f)):
+                    continue
+            key = os.path.realpath(f)
+            if key in seen:
+                continue
+            seen.add(key)
+            by_thread.setdefault(m.group(1), []).append(f)
     for paths in by_thread.values():
         paths.sort(key=os.path.basename)
     return by_thread
@@ -247,7 +257,7 @@ def parse_thread(paths):
 
     A continuation segment starts when Codex resumes the thread from an earlier point (a rewind or
     branch). Its ordinals restart a little below the end of the previous segment, but the records are
-    new: across all 47 multi-segment threads on 2026-10-21, 1,963 records reuse an ordinal and none is
+    new: in a sample of real multi-segment threads, many records reuse an ordinal and none is
     a copy. So every record is read, in file order. Turns from the part of a segment that a later
     segment rewound past (ordinal at or after the later segment's start) really happened but are no
     longer on the thread's visible history; they are kept and marked `rewound`. Turn state carries

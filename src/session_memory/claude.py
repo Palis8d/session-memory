@@ -9,7 +9,10 @@ from collections import Counter
 CLAUDE_PROJECTS = os.path.join(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"),
                                "projects")  # see config.claude_home
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
-TAG_BLOCK_RE = re.compile(r"<(system-reminder|command-[a-z-]+|local-command-[a-z]+)>[\s\S]*?</\1>")
+# Blocks Claude Code injects into user messages that the user didn't write: reminders, slash-command
+# plumbing, the output of `!` shell commands, and background-task notices. Output can hold secrets.
+TAG_BLOCK_RE = re.compile(r"<(system-reminder|command-[a-z-]+|local-command-[a-z]+|bash-stdout|bash-stderr|"
+                          r"task-notification)>[\s\S]*?</\1>")
 FILE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 NON_TEXT_BLOCKS = {"image", "document"}                       # user content that isn't text
 AGENT_NON_TEXT = {"tool_use", "thinking", "redacted_thinking", "server_tool_use", "web_search_tool_result"}
@@ -31,7 +34,7 @@ def list_logs():
     return out
 
 
-ADAPTER_VERSION = 6  # bump when parsing changes so `smem update` re-reads every Claude log
+ADAPTER_VERSION = 7  # bump when parsing changes so `smem update` re-reads every Claude log
 
 
 def log_sig(path):

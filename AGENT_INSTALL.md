@@ -37,17 +37,19 @@ pipx install git+https://github.com/Palis8d/session-memory
 
 If neither `uv` nor `pipx` exists, ask the user before installing one. uv's own installer is `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
-If `smem` isn't found afterwards, use `~/.local/bin/smem` for the rest of this guide, and tell the user that a new terminal will find it.
+Check it's this program: `smem --version` should print `smem 0.… (Session Memory)`. If `smem` isn't found, or something else answers (some Linux systems have an unrelated memory tool called `smem`), use the full path `~/.local/bin/smem` for the rest of this guide. If it simply wasn't found, tell the user a new terminal will find it.
 
 Inside a sandbox that blocks writing outside the project (Codex, for example), installing and the next step need the user's approval.
 
 ## 4. Set it up
 
-Match the flags to the user's answers. `auto`, `manual` and `off` are the three refresh modes. Add one `--exclude` for each folder they named.
+Match `--refresh` to the user's answer: `auto`, `manual` or `off`.
 
 ```bash
-smem setup --refresh auto --skills all --exclude ~/clients/acme
+smem setup --refresh auto --skills all
 ```
+
+If the user named folders to keep out, add `--exclude FOLDER` once for each one, using its full path (for example `--exclude ~/clients/acme`).
 
 This one step:
 - saves the settings;
@@ -57,6 +59,8 @@ This one step:
 - turns on the background refresh last.
 
 To show the user exactly what will happen first, run it with `--dry-run`.
+
+If they chose `auto` on a Mac, tell them macOS may show a "Background Items Added" notice naming Python. That notice is this background update.
 
 ## 5. Check that it works
 
@@ -69,18 +73,20 @@ Then run:
 
 ```bash
 smem stats
-smem recent --days 7
+smem recent --days 30
 smem search "WORDS"      # two or three distinctive words from the user's recent work
 ```
 
-If health is YELLOW or RED, read the lines it prints. They say what was found and what to run next.
+GREEN means all is well, and a fresh install should be GREEN. A YELLOW line is a note worth reading; each one says what it found. RED means something is wrong: tell the user what the RED line says. `smem health` exits with 0, 1 or 2 for GREEN, YELLOW or RED, so a YELLOW exit code isn't a failed install.
 
 ## 6. Report to the user (three sentences)
 
 Say what is installed, how many sessions are in memory and from what date, and the refresh mode. Tell them they can now ask Claude Code or Codex about past work in their own words. New sessions pick up the skill.
 
+If the user has Claude Code, also tell them: Claude Code deletes its own session logs after 30 days by default, and the memory only keeps what's on disk. If they want more kept, offer to raise `cleanupPeriodDays` in `~/.claude/settings.json` (for example to 3650), and change it only if they say yes.
+
 ## Later
 
 - Change the refresh: `smem refresh auto|manual|off --every 30`
 - See or change settings: `smem settings`, `smem settings KEY VALUE`
-- Remove everything it added: `smem uninstall` lists it first. The user's history is never touched.
+- Remove everything it added: `smem uninstall` lists what it would remove; with the user's yes, run `smem uninstall --yes`. The user's history is never touched. Then remove the program with `uv tool uninstall session-memory` (or `pipx uninstall session-memory`).

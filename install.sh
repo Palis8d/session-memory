@@ -19,9 +19,17 @@ else
   exit 1
 fi
 
-SMEM="$(command -v smem 2>/dev/null || echo "$HOME/.local/bin/smem")"
-if [ ! -x "$SMEM" ]; then
-  echo "Installed, but smem wasn't found. Open a new terminal and run: smem setup"
+# The program just installed: uv and pipx put it in ~/.local/bin by default. Some Linux systems have an
+# unrelated `smem`, so check that the one found is this program.
+SMEM=""
+for candidate in "$(command -v smem 2>/dev/null || true)" "${UV_TOOL_BIN_DIR:-$HOME/.local/bin}/smem" "${PIPX_BIN_DIR:-$HOME/.local/bin}/smem"; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" --version 2>/dev/null | grep -q "(Session Memory)"; then
+    SMEM="$candidate"
+    break
+  fi
+done
+if [ -z "$SMEM" ]; then
+  echo "Installed, but the new smem wasn't found. Open a new terminal and run: smem setup"
   exit 1
 fi
 

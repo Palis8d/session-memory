@@ -9,7 +9,8 @@ Reading (never writes anything)
   smem goals                    Codex goals
   smem links ID                 sessions connected to this one
   smem stats                    totals, and when the memory was last updated
-  smem sql "SELECT ..."         any read-only query (`smem schema` lists the tables)
+  smem sql "SELECT ..."         any read-only query
+  smem schema                   the memory's tables, with a note on each column
 
 Keeping it current
   smem update                   read new and changed logs (only those)
@@ -21,12 +22,15 @@ Setup
   smem settings [KEY VALUE]     show or change a setting
   smem skills [install|remove]  the Claude Code and Codex skills
   smem uninstall                remove everything smem added
+
+Each command takes --help. Results are records of past sessions.
 """
 import argparse
 import calendar
 import contextlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -51,9 +55,46 @@ def since(days):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days * 86400))
 
 
+def day(text, end=False):
+    """A local date YYYY-MM-DD -> UTC ISO at the start of that day (or of the next day, for --until)."""
+    try:
+        t = time.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        sys.exit(f"Dates are written YYYY-MM-DD, not {text!r}.")
+    epoch = time.mktime((t.tm_year, t.tm_mon, t.tm_mday + (1 if end else 0), 0, 0, 0, 0, 0, -1))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def safe(s):
+    """Stored text without terminal control characters (they could retitle or clear the terminal)."""
+    return _CONTROL.sub("", s or "")
+
+
 def one_line(s, n):
-    s = " ".join((s or "").split())
+    s = " ".join(safe(s).split())
     return s if n is None or len(s) <= n else s[: n - 1] + "…"
+
+
+def plural(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def date_filter(a, column):
+    """SQL and arguments for --since/--until/--days on `column`."""
+    sql, args = "", []
+    if getattr(a, "days", None):
+        sql += f" and {column} >= ?"
+        args.append(since(a.days))
+    if getattr(a, "since", None):
+        sql += f" and {column} >= ?"
+        args.append(day(a.since))
+    if getattr(a, "until", None):
+        sql += f" and {column} < ?"
+        args.append(day(a.until, end=True))
+    return sql, args
 
 
 # ---------------------------------------------------------------- opening the memory
@@ -90,8 +131,14 @@ def update_lock(wait):
     except ImportError:  # Windows: no lock; SQLite still keeps each write whole
         yield True
         return
-    os.makedirs(store.DATA_DIR, exist_ok=True)
-    with open(os.path.join(store.DATA_DIR, "update.lock"), "w") as f:
+    try:
+        if not os.path.isdir(store.DATA_DIR):
+            os.makedirs(store.DATA_DIR, mode=0o700)
+        lock = open(os.path.join(store.DATA_DIR, "update.lock"), "w")
+    except OSError as e:
+        sys.exit(f"Couldn't write to {store.DATA_DIR}: {e}. "
+                 "Inside an assistant's sandbox, updating needs permission to write there.")
+    with lock as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -129,15 +176,18 @@ def resolve(con, q, agent=None):
         args.append(agent)
     rows = con.execute(sql + " order by updated_at desc limit 10", args).fetchall()
     if not rows:
-        args = [f"%{q}%"] + ([agent] if agent else [])
-        rows = con.execute("select * from sessions where name like ?" + (" and agent=?" if agent else "")
+        # By name, or for unnamed sessions by their first request, which is what lists show instead.
+        args = [f"%{q}%", f"%{q}%"] + ([agent] if agent else [])
+        rows = con.execute("select * from sessions where (name like ? or (coalesce(name, '')='' and first_request like ?))"
+                           + (" and agent=?" if agent else "")
                            + " and kind='top' order by updated_at desc limit 10", args).fetchall()
     if not rows:
         sys.exit(f"No session matches {q!r}.")
     if len(rows) > 1 and not any(r["session_id"] == q or r["name"] == q for r in rows):
         print(f"{q!r} matches {len(rows)} sessions; showing the newest. Others:")
         for r in rows[1:]:
-            print(f"  {r['agent']:6} {r['session_id']}  {local(r['updated_at'])}  {one_line(r['name'], 60)}")
+            print(f"  {r['agent']:6} {r['session_id']}  {local(r['updated_at'])}  "
+                  f"{one_line(r['name'] or r['first_request'], 60)}")
     exact = [r for r in rows if r["session_id"] == q or r["name"] == q]
     return (exact or rows)[0]
 
@@ -153,6 +203,7 @@ def row_line(r):
 # ---------------------------------------------------------------- reading
 
 def cmd_search(a):
+    a.query = " ".join(a.query)  # unquoted words arrive separately
     con = reader()
     sql = """select f.agent, f.session_id, f.turn_index, s.name, s.updated_at, t.started_at,
                     snippet(turns_fts, 0, '[', ']', ' … ', 14) req, snippet(turns_fts, 1, '[', ']', ' … ', 18) ans
@@ -168,18 +219,43 @@ def cmd_search(a):
     if a.project:
         sql += " and (s.project like ? or s.cwd like ?)"
         args += [f"%{a.project}%"] * 2
-    if a.days:
-        sql += " and coalesce(t.started_at, s.updated_at) >= ?"
-        args.append(since(a.days))
-    sql += " order by bm25(turns_fts) limit ?"
-    args.append(a.limit)
+    extra, extra_args = date_filter(a, "coalesce(t.started_at, s.updated_at)")
+    sql += extra + " order by bm25(turns_fts) limit ?"
+    args += extra_args + [a.limit]
     try:
         rows = con.execute(sql, args).fetchall()
     except sqlite3.OperationalError as e:
-        sys.exit(f"Search couldn't read that query ({e}). Put words with punctuation inside double quotes, "
-                 'e.g. smem search \'"config.toml" error\'.')
+        # Punctuation (config.toml, foo-bar, don't) is query syntax to the search engine: retry with every
+        # word quoted, which searches the words literally.
+        quoted = " ".join('"' + w.replace('"', '""') + '"' for w in a.query.split())
+        try:
+            rows = con.execute(sql, [quoted] + args[1:]).fetchall()
+        except sqlite3.OperationalError:
+            sys.exit(f"Search couldn't read that query ({e}). Put words with punctuation inside double quotes, "
+                     'e.g. smem search \'"config.toml" error\'.')
+    any_word = False
+    plain = [w for w in a.query.split() if w.upper() not in ("AND", "OR", "NOT", "NEAR")]
+    if not rows and len(plain) > 1 and not re.search(r'["*:()]', a.query):
+        # Nothing has every word: show turns with any of them, best first, and say so.
+        either = " OR ".join('"' + w.replace('"', '""') + '"' for w in plain)
+        rows = con.execute(sql, [either] + args[1:]).fetchall()
+        any_word = bool(rows)
+    words = [w for w in re.findall(r"\w+", a.query) if w.upper() not in ("AND", "OR", "NOT", "NEAR")]
+    named = []
+    if words:  # session names aren't in the text index; list sessions whose name has every word
+        named = con.execute("select * from sessions where kind='top'" + " and name like ?" * len(words)
+                            + (" and agent=?" if a.agent else "") + " order by updated_at desc limit 5",
+                            [f"%{w}%" for w in words] + ([a.agent] if a.agent else [])).fetchall()
+    if named:
+        print("Sessions named like this:")
+        for r in named:
+            print("  " + row_line(r))
+        print()
+    if any_word:
+        print("No turn has all of those words; these have some of them, best first:")
     if not rows:
-        print("No matches. Search matches whole words (and their endings); try fewer or different words.")
+        print("No matches in requests or answers. Search matches whole words (and their endings); "
+              "try fewer or different words.")
     for r in rows:
         print(f"{local(r['started_at'] or r['updated_at'])}  {r['agent']:6} {one_line(r['name'], 50)}  "
               f"[{r['session_id'][:13]} turn {r['turn_index'] + 1}]")
@@ -193,7 +269,7 @@ def cmd_search(a):
 def cmd_session(a):
     con = reader()
     s = resolve(con, a.id, a.agent)
-    print(f"{s['name'] or '(unnamed)'}")
+    print(f"{one_line(s['name'] or s['first_request'], 120) or '(unnamed)'}")
     print(f"  {s['agent']} {s['kind']}  id {s['session_id']}  origin {s['origin']}"
           f"{'  ARCHIVED' if s['archived'] else ''}")
     print(f"  project {s['project']}  cwd {s['cwd']}")
@@ -229,9 +305,9 @@ def cmd_session(a):
         print(f"\n--- turn {t['turn_index'] + 1}/{len(turns)}  {local(t['started_at'])}  "
               f"commands {t['commands']}  files {t['files']}")
         if t["request"]:
-            print("  YOU:   " + (t["request"] if a.full else one_line(t["request"], clip)))
+            print("  YOU:   " + (safe(t["request"]) if a.full else one_line(t["request"], clip)))
         if t["answer"]:
-            print("  AGENT: " + (t["answer"] if a.full else one_line(t["answer"], clip * 2)))
+            print("  AGENT: " + (safe(t["answer"]) if a.full else one_line(t["answer"], clip * 2)))
         if t["aborted"]:
             print("  (turn was cancelled)")
         if t["rewound"]:
@@ -251,13 +327,21 @@ def cmd_session(a):
 
 def cmd_recent(a):
     con = reader()
-    sql = "select * from sessions where updated_at>=?" + ("" if a.helpers else " and kind='top'")
-    args = [since(a.days)]
+    if a.since or a.until:
+        a.days = None  # an explicit date range replaces the default "last 3 days"
+    sql = "select * from sessions where 1=1" + ("" if a.helpers else " and kind='top'")
+    extra, args = date_filter(a, "updated_at")
+    sql += extra
     if a.agent:
         sql += " and agent=?"
         args.append(a.agent)
-    for r in con.execute(sql + " order by updated_at desc limit ?", args + [a.limit]):
+    rows = con.execute(sql + " order by updated_at desc limit ?", args + [a.limit]).fetchall()
+    for r in rows:
         print(row_line(r))
+    if not rows:
+        newest = con.execute("select max(updated_at) from sessions" + ("" if a.helpers else " where kind='top'")
+                             ).fetchone()[0]
+        print("No sessions in that time." + (f" The newest is from {local(newest)}." if newest else ""))
     freshness_note(con)
 
 
@@ -266,9 +350,10 @@ def cmd_project(a):
     rows = con.execute("""select * from sessions where (project like ? or cwd like ?) and kind='top'
                           order by updated_at desc limit ?""", (f"%{a.name}%", f"%{a.name}%", a.limit)).fetchall()
     if not rows:
-        sys.exit(f"No sessions for a project matching {a.name!r}.")
+        print(f"No sessions for a project matching {a.name!r}.")
+        return
     projects = sorted({r["project"] for r in rows if r["project"]})
-    print(f"{len(rows)} sessions in {', '.join(projects[:6])}")
+    print(f"{plural(len(rows), 'session')} in {', '.join(projects[:6])}")
     for r in rows:
         print(row_line(r))
         if a.answers and r["last_answer"]:
@@ -280,13 +365,18 @@ def cmd_files(a):
     con = reader()
     rows = con.execute("""select f.path, f.change, f.turn_index, s.* from files_touched f
                           join sessions s on s.agent=f.agent and s.session_id=f.session_id
-                          where f.path like ? order by s.updated_at desc limit ?""",
+                          where f.path like ? order by s.updated_at desc, f.session_id, f.path limit ?""",
                        (f"%{a.path}%", a.limit)).fetchall()
     if not rows:
-        sys.exit(f"No session changed a file matching {a.path!r}.")
+        print(f"No session changed a file matching {a.path!r}.")
+        return
+    last = None
     for r in rows:
+        if (r["agent"], r["session_id"]) != last:
+            print(row_line(r))
+            last = (r["agent"], r["session_id"])
         turn = f" turn {r['turn_index'] + 1}" if r["turn_index"] is not None else ""
-        print(f"{row_line(r)}\n      {r['change'] or 'changed':7} {r['path']}{turn}")
+        print(f"      {r['change'] or 'changed':7} {safe(r['path'])}{turn}")
     freshness_note(con)
 
 
@@ -297,9 +387,12 @@ def cmd_goals(a):
     if a.status:
         sql += " where g.status=?"
         args.append(a.status)
-    for r in con.execute(sql + " order by g.updated_at desc", args):
+    rows = con.execute(sql + " order by g.updated_at desc", args).fetchall()
+    for r in rows:
         print(f"[{r['status']:8}] {local(r['updated_at'])}  {one_line(r['name'], 50):50}  {r['thread_id'][:13]}")
         print(f"           {one_line(r['objective'], 180)}")
+    if not rows:
+        print("No Codex goals" + (f" with status {a.status!r}." if a.status else "."))
 
 
 def cmd_links(a):
@@ -320,7 +413,8 @@ def cmd_stats(a):
     for r in con.execute("""select agent, kind, count(*) n, sum(turn_count) turns, sum(command_count) cmds,
                             sum(file_change_count) files, min(created_at) first, max(updated_at) last
                             from sessions group by agent, kind order by agent, kind"""):
-        print(f"{r['agent']:6} {r['kind']:6} {r['n']:6} sessions  {r['turns'] or 0:7} turns  {r['cmds'] or 0:8} commands"
+        kind = "main" if r["kind"] == "top" else r["kind"]  # main sessions, and helpers they started
+        print(f"{r['agent']:6} {kind:6} {r['n']:6} sessions  {r['turns'] or 0:7} turns  {r['cmds'] or 0:8} commands"
               f"  {r['files'] or 0:6} files  {local(r['first'])} → {local(r['last'])}")
     for k in ("links", "goals"):
         print(f"{k}: {con.execute(f'select count(*) from {k}').fetchone()[0]}")
@@ -331,7 +425,7 @@ def cmd_stats(a):
 
 
 def cmd_sql(a):
-    con = reader()
+    con = store.query_only(reader())
     try:
         cur = con.execute(a.query)
     except sqlite3.Error as e:
@@ -344,11 +438,13 @@ def cmd_sql(a):
         else:
             if n == 0:
                 print("\t".join(cols))
-            print("\t".join("" if v is None else str(v).replace("\t", " ").replace("\n", " ") for v in row))
+            print("\t".join("" if v is None else safe(str(v)).replace("\t", " ").replace("\n", " ") for v in row))
         n += 1
         if a.limit and n >= a.limit:
             print(f"(stopped at {a.limit} rows; --limit 0 shows all)", file=sys.stderr)
             break
+    if n == 0 and not a.json:
+        print("(no rows)", file=sys.stderr)
 
 
 def cmd_schema(a):
@@ -399,14 +495,15 @@ def summary(s):
         if state != "on":
             parts.append(f"{label}: {state}")
             continue
-        n = s.get(f"{agent}_parsed", 0)
-        parts.append(f"{label}: {n} session{'' if n == 1 else 's'} read, {s.get(f'{agent}_unchanged', 0)} unchanged")
-    removed = sum(v for k, v in s.items() if k.endswith("_removed") and isinstance(v, int))
-    if removed:
-        parts.append(f"{removed} removed (excluded, turned off, or their logs are gone)")
+        parts.append(f"{label}: {plural(s.get(f'{agent}_parsed', 0), 'session')} read, "
+                     f"{s.get(f'{agent}_unchanged', 0)} unchanged")
+    why = {"excluded by your settings": s.get("excluded_removed", 0),
+           "from a source you turned off": s.get("codex_source_off_removed", 0) + s.get("claude_source_off_removed", 0),
+           "whose logs are gone": s.get("codex_removed", 0) + s.get("claude_removed", 0)}
+    if any(why.values()):
+        parts.append("Removed " + ", ".join(f"{plural(n, 'session')} {w}" for w, n in why.items() if n))
     if s["failures"]:
-        n = len(s["failures"])
-        parts.append(f"{n} problem{'' if n == 1 else 's'} (smem health explains)")
+        parts.append(f"{plural(len(s['failures']), 'problem')} (smem health explains)")
     return f"Updated in {s.get('seconds', '?')}s. " + ". ".join(parts) + "."
 
 
@@ -495,6 +592,12 @@ def cmd_refresh(a):
             print(f"  {p}")
         if mode == "auto" and not st["installed"]:
             print("The background job is missing; `smem refresh auto` puts it back.")
+        elif st["installed"] and not st["current"]:
+            print("The background job's file doesn't match this installation or these settings "
+                  "(smem moved, upgraded, or the file was edited); `smem refresh auto` rewrites it.")
+        elif mode != "auto" and st["files"]:
+            print(f"A background job is installed although refresh is {mode}; it does nothing. "
+                  "`smem refresh manual` removes it.")
         if a.show:
             for path, text in schedule.plan(cfg["refresh"]["interval_minutes"])[1]:
                 print(f"\n# {path}\n{text}")
@@ -504,6 +607,8 @@ def cmd_refresh(a):
     if a.every is not None:
         cfg["refresh"]["interval_minutes"] = a.every
     config.validate(cfg)
+    if a.dry_run:
+        print("Dry run; nothing is changed.")
     for line in apply_refresh(cfg, dry_run=a.dry_run):
         print(line)
     if not a.dry_run:
@@ -536,17 +641,28 @@ def cmd_settings(a):
             for k, v in values.items():
                 print(f"  {section}.{k} = {config._toml_value(v)}")
         return
+    section, _, key = a.key.partition(".")
+    cfg = config.load()
+    if section not in cfg or key not in cfg[section]:
+        sys.exit(f"Unknown setting {a.key!r}. Run `smem settings` to see the names.")
     if a.value is None:
-        sys.exit("Give a value too, e.g. smem settings refresh.interval_minutes 30")
-    if a.dry_run:
-        print(f"Would set {a.key} = {a.value} in {config.config_path()}")
+        print(f"{a.key} = {config._toml_value(cfg[section][key])}")
         return
+    if a.dry_run:
+        print(f"Dry run; nothing is changed. Would set {a.key} = {a.value} in {config.config_path()}")
+        return
+    before = cfg[section][key]
     path = config.set_value(a.key, a.value)
-    print(f"Set {a.key}. Saved in {path}")
-    section = a.key.partition(".")[0]
+    print(f"Set {a.key} (the whole value is replaced). Saved in {path}")
     cfg = config.load()
     if section == "refresh":
-        for line in apply_refresh(cfg):
+        try:
+            lines = apply_refresh(cfg)
+        except SystemExit as e:  # the background job couldn't be set up: put the old value back
+            cfg[section][key] = before
+            config.save(cfg)
+            sys.exit(f"{e} {a.key} is back to {config._toml_value(before)}.")
+        for line in lines:
             print(line)
     elif section == "skills":
         for line in skills.sync():
@@ -606,10 +722,12 @@ def cmd_setup(a):
     print(f"  settings: {config.config_path()}")
     print(f"  memory:   {store.DB_PATH}")
     if a.dry_run:
-        print("  would save these settings:")
-        for section, values in cfg.items():
-            for k, v in values.items():
-                print(f"    {section}.{k} = {config._toml_value(v)}")
+        changed = [(f"{sec}.{k}", v) for sec, vals in cfg.items() for k, v in vals.items() if v != config.DEFAULTS[sec][k]]
+        print("  would save the settings file" + (" with: " + ", ".join(f"{k} = {config._toml_value(v)}"
+                                                                         for k, v in changed) if changed else
+                                                 " with the defaults"))
+        if not a.no_build:
+            print("  would build the memory (only reading the assistants' logs), then run the self-test and health checks")
     else:
         config.save(cfg)
         config.apply(cfg)
@@ -645,8 +763,9 @@ def _setup_refresh(cfg, dry_run):
         lines = apply_refresh(cfg, dry_run=dry_run)
     except SystemExit as e:  # e.g. no launchd/systemd here: fall back to manual rather than stop setup
         cfg["refresh"]["mode"] = "manual"
-        config.save(cfg)
-        lines = [str(e), "Refresh set to manual."]
+        if not dry_run:
+            config.save(cfg)
+        lines = [str(e), "Refresh " + ("would be" if dry_run else "is") + " set to manual."]
     for line in lines:
         print("  " + line)
 
@@ -690,17 +809,27 @@ def cmd_uninstall(a):
                 sys.exit("Run again with --yes to remove these.")
             if input("Remove them? [y/N] ").strip().lower() not in ("y", "yes"):
                 sys.exit("Nothing removed.")
-        for agent in skills.AGENTS:
-            skills.remove(agent)
-        schedule.disable()
-        if os.path.exists(config.config_path()):
-            os.remove(config.config_path())
-            with contextlib.suppress(OSError):
-                os.rmdir(os.path.dirname(config.config_path()))  # only if empty
-        if not a.keep_data and os.path.isdir(store.DATA_DIR):
-            _remove_data_dir()
-        print("Removed.")
+        steps = [(f"{skills.LABELS[agent]} skill", lambda agent=agent: skills.remove(agent)) for agent in skills.AGENTS]
+        steps.append(("background job", schedule.disable))
+        steps.append(("settings", _remove_settings))
+        if not a.keep_data:
+            steps.append(("memory", _remove_data_dir))
+        failed = []
+        for what, step in steps:  # each step on its own, so one problem doesn't leave the rest behind
+            try:
+                step()
+            except OSError as e:
+                failed.append(what)
+                print(f"  couldn't remove the {what}: {e}")
+        print("Removed." if not failed else f"Removed everything except: {', '.join(failed)}.")
     print("To remove the program itself: `uv tool uninstall session-memory` or `pipx uninstall session-memory`.")
+
+
+def _remove_settings():
+    if os.path.exists(config.config_path()):
+        os.remove(config.config_path())
+        with contextlib.suppress(OSError):
+            os.rmdir(os.path.dirname(config.config_path()))  # only if empty
 
 
 def _remove_data_dir():
@@ -708,6 +837,8 @@ def _remove_data_dir():
     names = {store.DB_PATH, store.DB_PATH + ".rebuild"}
     known = {n + s for n in names for s in ("", "-wal", "-shm")}
     known |= {os.path.join(store.DATA_DIR, n) for n in ("update.lock", "refresh.log", "refresh.log.1")}
+    if not os.path.isdir(store.DATA_DIR):
+        return
     for path in known:
         if os.path.exists(path):
             os.remove(path)
@@ -721,21 +852,26 @@ def _remove_data_dir():
 
 def parser():
     ap = argparse.ArgumentParser(prog="smem", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"smem {__version__}")
-    sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+    ap.add_argument("--version", action="version", version=f"smem {__version__} (Session Memory)")
+    sub = ap.add_subparsers(dest="cmd", metavar="COMMAND", help=argparse.SUPPRESS)  # the list above names them
 
     def cmd(name, fn, help):
-        p = sub.add_parser(name, help=help, description=help)
+        p = sub.add_parser(name, description=help)
         p.set_defaults(fn=fn)
         return p
 
+    def dates(p, days_help):
+        p.add_argument("--days", type=float, help=days_help)
+        p.add_argument("--since", metavar="YYYY-MM-DD", help="from this day on (local time)")
+        p.add_argument("--until", metavar="YYYY-MM-DD", help="up to and including this day")
+
     p = cmd("search", cmd_search, "full-text search over your requests and the assistants' answers")
-    p.add_argument("query", help='words (all must match), "an exact phrase", OR, NOT, prefix*')
+    p.add_argument("query", nargs="+", help='words (all must match), "an exact phrase", OR, NOT, prefix*')
     p.add_argument("--agent", choices=AGENT_CHOICES)
     p.add_argument("--project", help="only sessions whose project or folder contains this")
-    p.add_argument("--days", type=float, help="only turns from the last N days")
+    dates(p, "only turns from the last N days")
     p.add_argument("--helpers", action="store_true", help="include helper (sub-agent) sessions")
-    p.add_argument("--limit", type=int, default=15)
+    p.add_argument("--limit", type=int, default=15, help="most results to show (default 15)")
 
     p = cmd("session", cmd_session, "one session: details, links, recent turns, files changed")
     p.add_argument("id", help="a session id, its first characters, or part of its name")
@@ -744,19 +880,20 @@ def parser():
     p.add_argument("--full", action="store_true", help="show whole requests and answers")
 
     p = cmd("recent", cmd_recent, "sessions active recently, newest first")
-    p.add_argument("--days", type=float, default=3)
+    dates(p, "sessions active in the last N days (default 3)")
+    p.set_defaults(days=3)
     p.add_argument("--agent", choices=AGENT_CHOICES)
     p.add_argument("--helpers", action="store_true", help="include helper (sub-agent) sessions")
-    p.add_argument("--limit", type=int, default=40)
+    p.add_argument("--limit", type=int, default=40, help="most sessions to show (default 40)")
 
     p = cmd("project", cmd_project, "a project's sessions, newest first")
     p.add_argument("name")
-    p.add_argument("--limit", type=int, default=30)
+    p.add_argument("--limit", type=int, default=30, help="most sessions to show (default 30)")
     p.add_argument("--answers", action="store_true", help="add each session's last answer")
 
     p = cmd("files", cmd_files, "sessions that changed a file whose path contains PATH")
     p.add_argument("path")
-    p.add_argument("--limit", type=int, default=30)
+    p.add_argument("--limit", type=int, default=30, help="most changes to show (default 30)")
 
     p = cmd("goals", cmd_goals, "Codex goals")
     p.add_argument("--status", help="e.g. active, complete, blocked")
@@ -783,7 +920,8 @@ def parser():
     p.add_argument("--accept-removals", action="store_true",
                    help="allow more than 20%% of sessions to disappear (only when their logs were really removed)")
 
-    p = cmd("health", cmd_health, "checks that the memory is complete and current")
+    p = cmd("health", cmd_health, "checks that the memory is complete and current; exits 0 for GREEN, 1 for YELLOW, "
+                                   "2 for RED")
     p.add_argument("--fast", action="store_true", help="skip the comparison with Codex's own index")
     p.add_argument("--selftest", action="store_true", help="prove the checks on built-in sample logs")
     p.add_argument("--verbose", action="store_true", help="with --selftest, show every check's detail")
@@ -823,7 +961,12 @@ def parser():
 
 
 def main(argv=None):
-    a = parser().parse_args(argv)
+    os.umask(0o077)  # everything smem creates holds private session text: readable by this account only
+    ap = parser()
+    a = ap.parse_args(argv)
+    if not a.cmd:
+        ap.print_help()
+        return
     config.apply()
     a.fn(a)
 

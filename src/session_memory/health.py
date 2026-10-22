@@ -63,7 +63,7 @@ def check_capture(con, days=WINDOW_DAYS):
                         (agent, _since(days))).fetchone()
         n = r["n"] or 0
         if n < MIN_SAMPLE:
-            out.append((YELLOW if n else GREEN, f"{agent} capture", f"only {n} recent sessions with logs; too few to judge"))
+            out.append((GREEN, f"{agent} capture", f"only {n} recent sessions with logs; too few to judge yet"))
             continue
         req, ans = 100 * (r["req"] or 0) // n, 100 * (r["ans"] or 0) // n
         level = RED if min(req, ans) < 60 else YELLOW if min(req, ans) < 85 else GREEN
@@ -132,7 +132,7 @@ def check_trends(con, now=None):
 
 def check_new_tools(con, days=WINDOW_DAYS):
     """Tool names whose first use anywhere (from log timestamps, not session dates) is recent. A new way
-    of running commands or editing files is how the July 2026 break began, and it can first appear
+    of running commands or editing files is how a past log-format change first showed, and it can first appear
     inside a long-running older session."""
     since = _since(days)
     first, has_old = {}, set()
@@ -223,9 +223,8 @@ def check_discovery(con):
             # Unreadable where it used to be readable means something changed; never seen means new or log-only.
             if prev.get("codex_resolvable"):
                 level, detail = RED, detail + f"; Codex's thread table was readable before and isn't now: {e}"
-            else:
-                level = max(level, YELLOW, key=RANK.get)
-                detail += "; Codex's thread table wasn't found, so threads are read from their logs only"
+            else:  # never seen here: a new or older Codex, not a break; logs alone carry everything that matters
+                detail += "; Codex's thread table wasn't found, so threads are read from their logs alone"
         out.append((level, "codex discovery", detail + ("; run `smem update`" if missing else "")))
     if not in_use("claude"):
         out.append((GREEN, "claude discovery", "Claude Code isn't in use here (off in settings, or not installed)"))
@@ -297,9 +296,18 @@ def check_freshness(con):
     last, changed, cchanged = changed_since_update(con)
     if not last:
         return [(RED, "freshness", "never updated; run `smem update`")]
-    level = GREEN if not (changed or cchanged) else YELLOW
-    return [(level, "freshness", f"last update {last}; since then {changed} Codex and {cchanged} Claude sessions changed"
-             + ("; run `smem update`" if level != GREEN else ""))]
+    refresh = config.load()["refresh"]
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(_epoch(last)))
+    detail = f"last update {when}; since then {changed} Codex and {cchanged} Claude sessions changed"
+    if not (changed or cchanged):
+        return [(GREEN, "freshness", detail)]
+    if refresh["mode"] == "auto":
+        # The session asking is itself always "changed"; behind is only worth a flag when the job seems stopped.
+        if time.time() - _epoch(last) < 2 * 60 * refresh["interval_minutes"]:
+            return [(GREEN, "freshness", detail + "; auto refresh will read them")]
+        return [(YELLOW, "freshness", detail + "; auto refresh hasn't run for a while (`smem refresh` shows the job)")]
+    return [(YELLOW, "freshness", detail + ("; run `smem update`" if refresh["mode"] == "manual" else
+                                           "; refresh is off in settings"))]
 
 
 def changed_since_update(con):

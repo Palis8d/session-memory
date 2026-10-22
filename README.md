@@ -53,18 +53,20 @@ Either way, the memory saves tokens. Without it, an assistant looking for an old
 
 ## Your data stays yours
 
-- It reads `~/.claude` and `~/.codex` and never writes there.
-- The memory is one SQLite file in `~/.local/share/session-memory/`. No network, no account, no telemetry.
-- Passwords, keys and tokens are replaced with `[REDACTED]` before anything is stored.
-- To keep folders out: `smem settings privacy.exclude_paths '["~/clients/acme"]'`.
-- `smem uninstall` removes everything it added. Your Claude Code and Codex history is never touched.
+- It only reads your Claude Code and Codex history and never changes it. The one thing it adds in `~/.claude` is its skill (`~/.claude/skills/smem`); Codex's skill goes in `~/.agents/skills/smem`.
+- The memory is one SQLite file in `~/.local/share/session-memory/`, readable only by your account. No network, no account, no telemetry. It grows with your history, roughly 120 KB per session.
+- Common forms of passwords, keys and tokens are replaced with `[REDACTED]` before anything is stored. This is best effort: a secret in an unusual format can get through.
+- To keep folders out: `smem settings privacy.exclude_paths '["~/clients/acme"]'`. This sets the whole list (`smem settings privacy.exclude_paths` shows it). The next update removes those sessions and erases their text from the file.
+- When an assistant reads results, they go to that assistant's provider like anything else it reads. For example, Claude Code sessions that Codex looks up are sent to OpenAI.
+- `smem uninstall` lists, then removes, its skills, background job, settings and memory. Your Claude Code and Codex history is never touched. The program itself goes with `uv tool uninstall session-memory` (or `pipx uninstall session-memory`).
 
 ## Control
 
-- **Settings:** one commented file, `~/.config/session-memory/config.toml`. Run `smem settings` to see it, or edit it by hand.
-- **Refresh:** `smem refresh auto|manual|off --every 30`. Auto refresh is a standard background job: launchd on macOS, a systemd user timer on Linux. `smem refresh --show` prints it.
-- **Skills:** `smem skills`. It never overwrites a skill it didn't create.
-- **Everything else:** every command that changes something takes `--dry-run`. `smem sql` runs read-only queries, and `smem schema` explains the tables.
+- **Settings:** one file, `~/.config/session-memory/config.toml`. `smem settings` shows it; `smem settings KEY VALUE` changes one value. You can also edit the file by hand, but `smem` rewrites it on changes, so comments you add aren't kept.
+- **Refresh:** `smem refresh auto|manual|off --every 30`. Auto refresh is a standard background job: launchd on macOS, a systemd user timer on Linux. `smem refresh --show` prints it. On macOS, turning it on shows a "Background Items Added" notice naming Python; that's this job. On Linux the timer runs while you're logged in.
+- **Skills:** `smem skills`. It never overwrites a skill it didn't create, and upgrades leave a skill you edited alone.
+- **Previews:** `setup`, `refresh`, `settings`, `skills` and `uninstall` take `--dry-run`.
+- **Your own queries:** `smem sql` runs read-only SQL (it can't write anything), and `smem schema` explains the tables.
 
 ## How it works
 
@@ -73,15 +75,16 @@ Claude Code and Codex save each session as a log file on your computer. `smem up
 ## How it's checked
 
 - `smem health` checks that the memory is current, that every log on disk is in it, that counts match Codex's own index, and that the log formats haven't changed.
-- `smem health --selftest` shows the checks catching seven kinds of breakage in built-in sample logs.
-- 47 automated tests run on Python 3.11 to 3.14.
+- `smem health --selftest` shows the checks catching five kinds of log-format change in built-in sample logs, and staying quiet in two normal situations.
+- 63 automated tests run on Python 3.11 to 3.14.
 
 ## Requirements and limits
 
 - macOS or Linux, with [uv](https://docs.astral.sh/uv/) or pipx. uv fetches Python 3.11+ if you don't have it. Windows hasn't been tested, and auto refresh isn't available there.
-- Only sessions whose logs are on this computer are included.
-- Not stored: hidden reasoning, command output, tool results, images. Commands are counted, not kept.
+- Only sessions whose logs are on this computer are included. Claude Code deletes its own session logs after 30 days by default, and the memory follows what's on disk. To keep more, raise `cleanupPeriodDays` in `~/.claude/settings.json`.
+- Not stored: hidden reasoning, command output and tool results, images. Commands are counted, not kept.
 - Search matches words and their endings, not meaning.
+- Some Linux systems have an unrelated memory-reporting tool also called `smem`. If yours does, the one found first on your PATH runs.
 
 ## License
 

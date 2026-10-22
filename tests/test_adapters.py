@@ -57,7 +57,7 @@ def test_drift_is_reported():
     assert r["unknown_types"].get("event:item_done") == 3
 
 
-def test_scrub():  # review F1
+def test_scrub():
     cases = ["key sk-ant-abcdefghijklmnopqrstuvwxyz0123 and token=supersecretvalue1",
              '{"password": "synthetic-password-123"}', "SERVICE_API_KEY=synthetic-value-123456",
              "postgresql://user:synthetic-password-123@localhost/db", 'set password: "two words here" ok']
@@ -109,7 +109,7 @@ def _item(o, item):
     return _ev(o, {"type": "item_completed", "item": item})
 
 
-def test_segment_boundary_after_commentary_and_split_call():  # review F3
+def test_segment_boundary_after_commentary_and_split_call():
     meta = {"type": "session_meta", "ordinal": 0, "payload": {"id": "dddddddd-0000-0000-0000-000000000001"}}
     seg1 = [meta, _ev(1, {"type": "task_started"}),
             _item(2, {"type": "UserMessage", "content": [{"type": "text", "text": "synthetic request"}]}),
@@ -127,7 +127,7 @@ def test_segment_boundary_after_commentary_and_split_call():  # review F3
     assert r["command_count"] == 1 and r["commands_estimated"] == 0, r
 
 
-def test_mixed_legacy_then_items():  # review F14
+def test_mixed_legacy_then_items():
     recs = [_ev(1, {"type": "task_started"}), _ev(2, {"type": "user_message", "message": "First ask"}),
             _ev(3, {"type": "agent_message", "message": "First answer"}), _ev(4, {"type": "task_complete"}),
             _ev(5, {"type": "task_started"}),
@@ -138,7 +138,7 @@ def test_mixed_legacy_then_items():  # review F14
     assert [(t["request"], t["answer"]) for t in r["turns"]] == [("First ask", "First answer"), ("Second ask", "Second answer")]
 
 
-def test_file_turn_index_after_filtering():  # review F7
+def test_file_turn_index_after_filtering():
     recs = [_ev(1, {"type": "task_started"}), _ev(2, {"type": "task_started"}),  # empty setup turn is dropped
             _item(3, {"type": "UserMessage", "content": [{"type": "text", "text": "edit it"}]}),
             _item(4, {"type": "FileChange", "changes": {"/tmp/a.py": {"type": "update"}}})]
@@ -160,7 +160,7 @@ def _put(con, sid, turns, parent=None, agent="codex", forked=True):
         "turns": turns, "files": {}, "command_count": sum(t["commands"] for t in turns)})
 
 
-def test_legacy_helper_meta_and_inherited_turns():  # review F2
+def test_legacy_helper_meta_and_inherited_turns():
     kind, parent, role = codex.helper_info({"subagent": {"thread_spawn": {"parent_thread_id": "P", "agent_role": "worker"}}})
     assert (kind, parent, role) == ("helper", "P", "worker")
     with tempfile.TemporaryDirectory() as tmp:
@@ -176,7 +176,7 @@ def test_legacy_helper_meta_and_inherited_turns():  # review F2
         assert con.execute("select turn_index from turns where session_id='C'").fetchall()[0][0] == 0
 
 
-def test_trimming_keeps_real_child_work():  # rereview R1
+def test_trimming_keeps_real_child_work():
     with tempfile.TemporaryDirectory() as tmp:
         con = store.connect(os.path.join(tmp, "t.sqlite"))
         # same wording, different answer: the child's own work
@@ -201,7 +201,7 @@ def test_trimming_keeps_real_child_work():  # rereview R1
                                           "order by session_id")] == [2, 2, 2, 2]
 
 
-def test_full_rebuild_failure_keeps_store():  # rereview R2
+def test_full_rebuild_failure_keeps_store():
     from unittest.mock import patch
     with tempfile.TemporaryDirectory() as tmp:
         old = store.connect(os.path.join(tmp, "old.sqlite"))
@@ -235,7 +235,7 @@ class _SyncPool:
         return map(fn, items)
 
 
-def test_scrub_escaped_json_and_refresh():  # rereview R3/R4
+def test_scrub_escaped_json_and_refresh():
     assert "def-secret" not in store.clean(json.dumps({"password": 'abc"def-secret-123'}))
     assert store.clean("password=12345") == "password=[REDACTED]"
     assert "secret-9" not in store.clean('{\\"api_key\\": \\"secret-9\\"}')
@@ -252,7 +252,7 @@ def test_scrub_escaped_json_and_refresh():  # rereview R3/R4
         assert con.execute("select git_branch from sessions").fetchone()[0] == "token=[REDACTED]"
 
 
-def test_db_name_must_stay_in_data():  # rereview R5
+def test_db_name_must_stay_in_data():
     import subprocess
     for bad in ("/outside-data/probe.sqlite", "../escape.sqlite"):
         r = subprocess.run([sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {SRC!r}); import session_memory.store"],
@@ -261,7 +261,7 @@ def test_db_name_must_stay_in_data():  # rereview R5
         assert r.returncode != 0 and "plain file name" in (r.stderr + r.stdout), (bad, r.stderr)
 
 
-def test_signature_includes_full_path():  # rereview R8
+def test_signature_includes_full_path():
     with tempfile.TemporaryDirectory() as tmp:
         a, b = os.path.join(tmp, "a", "same.jsonl"), os.path.join(tmp, "b", "same.jsonl")
         for p in (a, b):
@@ -271,7 +271,7 @@ def test_signature_includes_full_path():  # rereview R8
         assert codex.log_sig(a) != codex.log_sig(b) and claude.log_sig(a) != claude.log_sig(b)
 
 
-def test_same_turn_mirror_and_follow_up():  # rereview R10
+def test_same_turn_mirror_and_follow_up():
     recs = [_ev(1, {"type": "task_started"}), _ev(2, {"type": "user_message", "message": "First ask"}),
             _item(3, {"type": "UserMessage", "content": [{"type": "text", "text": "First ask"}]}),
             _item(4, {"type": "UserMessage", "content": [{"type": "text", "text": "Real follow-up"}]}),
@@ -281,7 +281,7 @@ def test_same_turn_mirror_and_follow_up():  # rereview R10
     assert r["turns"][0]["request"] == "First ask\n\nReal follow-up", r["turns"]
 
 
-def test_session_full_shows_everything():  # rereview R9
+def test_session_full_shows_everything():
     import contextlib
     import io
     from unittest.mock import patch
@@ -295,7 +295,7 @@ def test_session_full_shows_everything():  # rereview R9
         assert "TAIL_SENTINEL" in out.getvalue()
 
 
-def test_claude_compaction_summary_is_not_a_prompt():  # review F6
+def test_claude_compaction_summary_is_not_a_prompt():
     recs = [{"type": "user", "isCompactSummary": True, "message": {"role": "user", "content": "This session is being continued…"}},
             {"type": "user", "message": {"role": "user", "content": "real ask"}},
             {"type": "assistant", "message": {"role": "assistant", "content": [
@@ -309,10 +309,10 @@ def test_claude_compaction_summary_is_not_a_prompt():  # review F6
         r = claude.parse_log(_write(tmp, "s.jsonl", recs), "s", None)
     assert [t["request"] for t in r["turns"]] == ["real ask"], r["turns"]
     assert r["inherited_context"].startswith("This session is being continued")
-    assert list(r["files"]) == ["/tmp/ok.py"], r["files"]  # review S3: failed edits aren't changes
+    assert list(r["files"]) == ["/tmp/ok.py"], r["files"]  # failed edits aren't changes
 
 
-def test_vanished_sources_are_removed():  # review F8
+def test_vanished_sources_are_removed():
     with tempfile.TemporaryDirectory() as tmp:
         con = store.connect(os.path.join(tmp, "t.sqlite"))
         for sid in ("a", "b", "c", "d", "e", "f"):
@@ -326,7 +326,7 @@ def test_vanished_sources_are_removed():  # review F8
         assert con.execute("select count(*) from sessions").fetchone()[0] == 5
 
 
-def test_store_refuses_source_paths():  # review F13
+def test_store_refuses_source_paths():
     try:
         store.connect(os.path.expanduser("~/.codex/should-never-exist.sqlite"))
     except ValueError:
@@ -334,7 +334,7 @@ def test_store_refuses_source_paths():  # review F13
     raise AssertionError("connect() accepted a path inside ~/.codex")
 
 
-def test_local_time_handles_daylight_saving():  # review F12
+def test_local_time_handles_daylight_saving():
     mem = cli
     old = os.environ.get("TZ")
     os.environ["TZ"] = "America/Denver"
@@ -350,7 +350,8 @@ def test_local_time_handles_daylight_saving():  # review F12
         time.tzset()
 
 
-def test_outdated_store_is_never_wiped():  # self-review: schema change must not destroy the store
+def test_outdated_store_is_never_wiped():
+    # schema change must not destroy the store
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "t.sqlite")
         con = store.connect(path)
@@ -370,7 +371,7 @@ def test_outdated_store_is_never_wiped():  # self-review: schema change must not
         assert old.execute("select value from meta where key='acked_tools'").fetchone()[0] == '["_web_run"]'
 
 
-def test_empty_answers_are_readable_and_markdown_secrets():  # self-review
+def test_empty_answers_are_readable_and_markdown_secrets():
     recs = [_ev(1, {"type": "task_started"}),
             _item(2, {"type": "UserMessage", "content": [{"type": "text", "text": "<heartbeat>tick</heartbeat>"}]}),
             _item(3, {"type": "AgentMessage", "phase": "final_answer", "content": [{"type": "Text", "text": ""}]})]
@@ -384,7 +385,7 @@ def test_empty_answers_are_readable_and_markdown_secrets():  # self-review
     assert r["turns"][0]["raw_hash"] is None
 
 
-# ---------------------------------------------------------------- final review (N1-N8, P3/S4)
+# ---------------------------------------------------------------- rebuild safety, cross-checks and segments
 
 def _mem():
     return cli
@@ -425,7 +426,7 @@ def _run(patches, fn):
         return fn()
 
 
-def test_rebuild_refuses_after_a_read_failure_and_keeps_goals():  # N1
+def test_rebuild_refuses_after_a_read_failure_and_keeps_goals():
     mem = _mem()
     with tempfile.TemporaryDirectory() as tmp:
         live = os.path.join(tmp, "memory.sqlite")
@@ -457,7 +458,7 @@ def test_rebuild_refuses_after_a_read_failure_and_keeps_goals():  # N1
             mem.store.DB_PATH = old_path
 
 
-def test_rebuild_swap_keeps_readers_consistent():  # N2
+def test_rebuild_swap_keeps_readers_consistent():
     from unittest.mock import patch
     mem = _mem()
     with tempfile.TemporaryDirectory() as tmp:
@@ -488,7 +489,7 @@ def test_rebuild_swap_keeps_readers_consistent():  # N2
         fresh.close()
 
 
-def test_no_text_hashes_are_stored():  # N3
+def test_no_text_hashes_are_stored():
     with tempfile.TemporaryDirectory() as tmp:
         con = store.connect(os.path.join(tmp, "t.sqlite"))
         cols = {r[1] for r in con.execute("pragma table_info(turns)")}
@@ -499,7 +500,7 @@ def test_no_text_hashes_are_stored():  # N3
         assert all("0420" not in str(v) for v in tuple(row)), tuple(row)
 
 
-def test_claude_unread_text_and_crosscheck_on_reads():  # N4
+def test_claude_unread_text_and_crosscheck_on_reads():
     recs = [{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "valid"}]}}]
     recs += [{"type": "user", "message": {"role": "user", "content": [{"type": "text", "body": "lost"}]}}] * 9
     recs += [{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "output_text", "text": "moved"}]}}] * 3
@@ -528,7 +529,7 @@ def test_claude_unread_text_and_crosscheck_on_reads():  # N4
         assert lvl == health.RED and "user messages read 1 vs 10" in detail, (lvl, detail)
 
 
-def test_refused_update_keeps_discovery_baseline():  # N5
+def test_refused_update_keeps_discovery_baseline():
     with tempfile.TemporaryDirectory() as tmp:
         con = store.connect(os.path.join(tmp, "t.sqlite"))
         _seed_claude(con, [f"s{i}" for i in range(6)], goal=False)
@@ -539,7 +540,7 @@ def test_refused_update_keeps_discovery_baseline():  # N5
         assert json.loads(con.execute("select value from meta where key='inventory'").fetchone()[0])["claude_logs"] == 6
 
 
-def test_discovery_finds_logs_the_scan_missed():  # N5
+def test_discovery_finds_logs_the_scan_missed():
     with tempfile.TemporaryDirectory() as tmp:
         home = os.path.join(tmp, "codex")
         os.makedirs(os.path.join(home, "sessions"))
@@ -561,7 +562,7 @@ def test_discovery_finds_logs_the_scan_missed():  # N5
         assert lvl == health.RED and "weren't found by the scan" in detail, (lvl, detail)
 
 
-def test_merge_keeps_source_order_and_latest_progress():  # N6
+def test_merge_keeps_source_order_and_latest_progress():
     recs = [_ev(1, {"type": "task_started"}), _ev(2, {"type": "user_message", "message": "A"}),
             _item(3, {"type": "UserMessage", "content": [{"type": "text", "text": "A"}]}),
             _item(4, {"type": "UserMessage", "content": [{"type": "text", "text": "B"}]}),
@@ -581,12 +582,12 @@ def test_merge_keeps_source_order_and_latest_progress():  # N6
     assert r["turns"][0]["request"] == "go\n\ngo", r["turns"]  # sent twice on purpose, mirrored once each
 
 
-def test_escaped_json_keeps_following_fields():  # N7
+def test_escaped_json_keeps_following_fields():
     out = store.clean(r'{\"password\": \"synthetic-123\", \"author\": \"Alice\", \"note\": \"keep me\"}')
     assert "synthetic" not in out and "Alice" in out and "keep me" in out, out
 
 
-def test_table_parent_clears_but_log_parent_stays():  # N8
+def test_table_parent_clears_but_log_parent_stays():
     with tempfile.TemporaryDirectory() as tmp:
         con = store.connect(os.path.join(tmp, "t.sqlite"))
         for sid, src in (("t", "table"), ("l", "log")):
@@ -602,7 +603,7 @@ def test_table_parent_clears_but_log_parent_stays():  # N8
         assert got == {"t": None, "l": "old-parent"}, got
 
 
-def test_duplicate_segment_and_ordinal_reset():  # P3 / S4
+def test_duplicate_segment_and_ordinal_reset():
     meta = {"type": "session_meta", "ordinal": 0, "payload": {"id": "ffffffff-0000-0000-0000-000000000001"}}
     seg = [meta] + [_ev(1, {"type": "task_started"}),
                     _item(2, {"type": "UserMessage", "content": [{"type": "text", "text": "ask"}]}),
@@ -622,9 +623,9 @@ def test_duplicate_segment_and_ordinal_reset():  # P3 / S4
         assert [t["rewound"] for t in rst["turns"]] == [1, 0]  # the first branch was rewound past
 
 
-# ---------------------------------------------------------------- confirmation (C1, C2)
+# ---------------------------------------------------------------- escaped JSON and duplicate segments
 
-def test_escaped_quote_inside_escaped_json_is_fully_redacted():  # C1
+def test_escaped_quote_inside_escaped_json_is_fully_redacted():
     s = json.dumps(json.dumps({"password": 'prefix"TAIL_SENTINEL', "author": "Alice"}))[1:-1]
     out = store.clean(s)
     assert "TAIL_SENTINEL" not in out and "Alice" in out, out
@@ -639,7 +640,7 @@ def test_escaped_quote_inside_escaped_json_is_fully_redacted():  # C1
             assert "TAIL_SENTINEL" not in con.execute(q).fetchone()[0], q
 
 
-def test_duplicate_segment_does_not_mark_rewound():  # C2
+def test_duplicate_segment_does_not_mark_rewound():
     meta = {"type": "session_meta", "ordinal": 0, "payload": {"id": "eeeeeeee-0000-0000-0000-000000000001"}}
     seg = [meta, _ev(1, {"type": "task_started", "turn_id": "t1"}),
            _item(2, {"type": "UserMessage", "content": [{"type": "text", "text": "ask"}]}),

@@ -8,7 +8,7 @@ import platform
 import subprocess
 import sys
 
-from . import config
+from . import config, skills
 
 LABEL = "com.palis8d.session-memory"
 RAN = []  # commands recorded instead of run when SESSION_MEMORY_DRY_SYSTEM is set
@@ -16,7 +16,7 @@ RAN = []  # commands recorded instead of run when SESSION_MEMORY_DRY_SYSTEM is s
 
 def _command():
     """What the background job runs: this same installation, refreshing quietly."""
-    return [sys.executable, "-m", "session_memory", "update", "--scheduled"]
+    return skills.program() + ["update", "--scheduled"]
 
 
 def _log_path():
@@ -24,8 +24,11 @@ def _log_path():
 
 
 def _env():
-    """Pin the folders the job uses, so it can't drift if a shell variable changes later."""
-    env = {"SESSION_MEMORY_HOME": config.data_dir(), "SESSION_MEMORY_CONFIG": config.config_path()}
+    """Pin every folder the job uses. Background jobs don't load the shell's settings, so without this a
+    user who moved Claude Code's or Codex's folder would have the job read (and reconcile against) the
+    default one."""
+    env = {"SESSION_MEMORY_HOME": config.data_dir(), "SESSION_MEMORY_CONFIG": config.config_path(),
+           "CODEX_HOME": config.codex_home(), "CLAUDE_CONFIG_DIR": config.claude_home()}
     if os.environ.get("SESSION_MEMORY_DB_NAME"):
         env["SESSION_MEMORY_DB_NAME"] = os.environ["SESSION_MEMORY_DB_NAME"]
     return env
@@ -56,6 +59,7 @@ def plan(interval_minutes):
   <key>StartInterval</key><integer>{interval_minutes * 60}</integer>
   <key>RunAtLoad</key><true/>
   <key>LowPriorityIO</key><true/>
+  <key>Umask</key><integer>63</integer>
   <key>Nice</key><integer>10</integer>
   <key>StandardOutPath</key><string>{_xml(_log_path())}</string>
   <key>StandardErrorPath</key><string>{_xml(_log_path())}</string>
@@ -79,6 +83,7 @@ Description=Session Memory refresh (smem)
 [Service]
 Type=oneshot
 Nice=10
+UMask=0077
 {env_lines}
 ExecStart={exec_line}
 """),
@@ -138,10 +143,17 @@ def disable(dry_run=False):
 
 
 def status():
-    kind, files, _, _ = plan(15)
+    kind, files, _, _ = plan(config.load()["refresh"]["interval_minutes"])
     present = [p for p, _ in files if os.path.exists(p)]
+
+    def same(path, text):
+        try:
+            with open(path) as f:
+                return f.read() == text
+        except OSError:
+            return False
     return {"system": kind, "installed": bool(files) and len(present) == len(files), "files": present,
-            "log": _log_path()}
+            "current": all(same(p, t) for p, t in files)}
 
 
 def _run(c):
@@ -159,4 +171,8 @@ def _xml(s):
 
 
 def _quote(s):
-    return s if s and all(c.isalnum() or c in "/._-=" for c in s) else '"' + s.replace('"', '\\"') + '"'
+    """One argument for a systemd unit line: quoted, with systemd's own specials (%, $, \\) escaped."""
+    if "\n" in s or "\r" in s:
+        raise SystemExit(f"Automatic refresh can't use a path with a line break in it: {s!r}")
+    s = s.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+    return f'"{s}"'

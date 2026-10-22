@@ -201,7 +201,7 @@ def test_background_job_files_and_commands():
     if kind == "unsupported":
         return
     text = "".join(t for _, t in files)
-    assert "update" in text and "--scheduled" in text and sys.executable in text
+    assert "update" in text and "--scheduled" in text and skills.program()[0] in text
     assert os.environ["SESSION_MEMORY_HOME"] in text and os.environ["SESSION_MEMORY_CONFIG"] in text
     assert ("1200" in text) if kind == "launchd" else ("20min" in text)
     assert not any(os.path.exists(p) for p, _ in files)  # a dry run writes nothing
@@ -299,7 +299,7 @@ def test_end_to_end_setup_read_only_use_and_uninstall():
                                                  "--json").stdout.splitlines()]
             assert {r["agent"]: r["n"] for r in rows} == {"claude": 1, "codex": 1}, rows
             bad = _smem("sql", "delete from sessions", check=False)
-            assert bad.returncode and "readonly" in (bad.stderr + bad.stdout).lower().replace(" ", ""), bad
+            assert bad.returncode and "not authorized" in bad.stderr, bad
             assert "last update" in _smem("stats").stdout
             assert _smem("health", "--fast", check=False).returncode in (0, 1)
         finally:
@@ -343,6 +343,237 @@ def test_uninstall_keeps_files_it_did_not_create():
         cli.main(["uninstall", "--yes"])
     assert os.path.exists(keep) and not os.path.exists(store.DB_PATH)
     os.remove(keep)
+
+
+# ---------------------------------------------------------------- found in review (each fails without its fix)
+
+def _update(con):
+    with patch.object(ingest, "ProcessPoolExecutor", _SyncPool):
+        return ingest.update(con, workers=1, log=QUIET)
+
+
+def _codex_log(cwd, tid, ask, folder="sessions/2026/10/15"):
+    raw = open(os.path.join(FX, "codex_current.jsonl")).read()
+    raw = raw.replace("/tmp/demo", cwd).replace("Add a health check to the demo app", ask)
+    raw = raw.replace("aaaaaaaa-0000-0000-0000-000000000001", tid)
+    d = os.path.join(config.codex_home(), folder)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"rollout-2026-10-15T10-00-00-{tid}.jsonl")
+    open(path, "w").write(raw)
+    return path
+
+
+def _clean_sources():
+    for sub in ("sessions", "projects"):
+        base = config.codex_home() if sub == "sessions" else config.claude_home()
+        shutil.rmtree(os.path.join(base, sub), ignore_errors=True)
+        os.makedirs(os.path.join(base, sub))
+
+
+def test_broken_links_and_logs_that_move_mid_update():
+    _reset_settings()
+    try:
+        real = _codex_log("/work/a", "c0dec0de-0000-4000-8000-000000000001", "first ask")
+        links = os.path.join(config.codex_home(), "sessions", "copies")
+        os.makedirs(links)
+        os.symlink(real, os.path.join(links, os.path.basename(real)))  # a second route to the same log
+        os.symlink("/nonexistent/rollout-2026-10-15T10-00-00-c0dec0de-0000-4000-8000-000000000009.jsonl",
+                   os.path.join(links, "rollout-2026-10-15T10-00-00-c0dec0de-0000-4000-8000-000000000009.jsonl"))
+        found = codex.scan_rollouts()
+        assert list(found) == ["c0dec0de-0000-4000-8000-000000000001"] and len(found[list(found)[0]]) == 1, found
+        with tempfile.TemporaryDirectory() as tmp:
+            con = store.connect(os.path.join(tmp, "t.sqlite"))
+            gone = {"c0dec0de-0000-4000-8000-000000000002": ["/nonexistent/rollout-x.jsonl"]}
+            with patch.object(codex, "scan_rollouts", lambda: dict(found, **gone)):
+                s = _update(con)  # a log that vanished after the scan is skipped, not fatal
+            assert s.get("moved_during_update") == 1 and s["codex_parsed"] == 1, s
+            con.close()
+    finally:
+        _clean_sources()
+
+
+def test_shell_output_and_notices_are_not_stored_as_requests():
+    _reset_settings()
+    try:
+        path = _claude_log("/work/b", "33333333-0000-0000-0000-000000000001", "deploy it")
+        with open(path, "a") as f:
+            for text in ("<bash-input>cat .env</bash-input><bash-stdout>DB_PASS=CANARY_771</bash-stdout><bash-stderr></bash-stderr>",
+                         "<task-notification><task-id>x</task-id>CANARY_882 finished</task-notification>"):
+                f.write(json.dumps({"type": "user", "cwd": "/work/b", "message": {"role": "user", "content": text}}) + "\n")
+        r = claude.parse_log(path, "s", None)
+        text = json.dumps(r["turns"])
+        assert "CANARY_771" not in text and "CANARY_882" not in text and "cat .env" in text, r["turns"]
+    finally:
+        _clean_sources()
+
+
+def test_exclusions_are_exact_complete_and_erased():
+    _reset_settings()
+    try:
+        _claude_log("/work/acme", "44444444-0000-0000-0000-000000000001", "acme secret plans ZEBRAWORD")
+        _claude_log("/work/acme/api", "44444444-0000-0000-0000-000000000002", "acme api ZEBRAWORD")
+        _claude_log("/work/acme-tools", "44444444-0000-0000-0000-000000000003", "a sibling folder")
+        _codex_log("/work/acme", "c0dec0de-0000-4000-8000-000000000003", "codex in acme ZEBRAWORD")
+        _codex_log("/work/acme-tools", "c0dec0de-0000-4000-8000-000000000004", "codex in the sibling")
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "t.sqlite")
+            con = store.connect(db)
+            _update(con)
+            assert con.execute("select count(*) from sessions").fetchone()[0] == 5
+            exclude = "/WORK/Acme" if sys.platform == "darwin" else "/work/acme"  # macOS folders ignore case
+            config.set_value("privacy.exclude_paths", json.dumps([exclude + "/"]))
+            s = _update(con)  # the Codex thread is unchanged on disk: it must still go
+            left = sorted(r[0] for r in con.execute("select cwd from sessions"))
+            assert left == ["/work/acme-tools", "/work/acme-tools"], (left, s)
+            con.close()
+            raw = open(db, "rb").read() + (open(db + "-wal", "rb").read() if os.path.exists(db + "-wal") else b"")
+            assert b"ZEBRAWORD" not in raw and b"zebraword" not in raw  # gone from the file, not only the index
+        for bad in ('"~/work/acme"', '["work/acme"]', "[1, 2]"):
+            try:
+                config.set_value("privacy.exclude_paths", bad)
+                raise AssertionError(f"accepted exclude_paths = {bad}")
+            except SystemExit:
+                pass
+    finally:
+        _clean_sources()
+        _reset_settings()
+
+
+def test_settings_file_mistakes_are_explained_not_crashes():
+    for text, words in (("[privacy]\nexclude_path = []\n", "unknown setting privacy.exclude_path"),
+                        ("[privacy]\nexclude_paths = \"~/x\"\n", "must be a list of text"),
+                        ("[refresh\nmode = 1\n", "can't be read")):
+        os.makedirs(os.path.dirname(config.config_path()), exist_ok=True)
+        open(config.config_path(), "w").write(text)
+        try:
+            config.load(reload=True)
+            raise AssertionError(f"accepted {text!r}")
+        except SystemExit as e:
+            assert words in str(e), (words, str(e))
+    _reset_settings()
+
+
+def test_sql_can_only_read():
+    with tempfile.TemporaryDirectory() as tmp:
+        con = store.connect(os.path.join(tmp, "t.sqlite"))
+        store.replace_session(con, {"agent": "claude", "session_id": "s", "kind": "top", "log_path": "p",
+                                    "turns": [{"request": "hello world", "answer": "hi"}], "files": {}})
+        con.commit()
+        con.close()
+        ro = store.query_only(store.connect_readonly(os.path.join(tmp, "t.sqlite")))
+        assert ro.execute("select snippet(turns_fts, 0, '[', ']', '…', 5) from turns_fts "
+                          "where turns_fts match 'hello'").fetchone()[0] == "[hello] world"
+        assert ro.execute("select count(*) from pragma_table_info('sessions')").fetchone()[0] > 5
+        for q in (f"vacuum into '{tmp}/copy.sqlite'", f"attach '{tmp}/new.sqlite' as x", "delete from sessions",
+                  "pragma query_only=off", "create temp table t(x)"):
+            try:
+                ro.execute(q)
+                raise AssertionError(f"allowed: {q}")
+            except sqlite3.Error:
+                pass
+        assert not {"copy.sqlite", "new.sqlite"} & set(os.listdir(tmp)), os.listdir(tmp)
+
+
+def test_private_files_and_no_files_in_codex_folder():
+    old = os.umask(0o077)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o755)
+            data = os.path.join(tmp, "data")
+            con = store.connect(os.path.join(data, "memory.sqlite"))
+            con.close()
+            assert stat.S_IMODE(os.stat(data).st_mode) == 0o700
+            assert stat.S_IMODE(os.stat(os.path.join(data, "memory.sqlite")).st_mode) == 0o600
+            home = os.path.join(tmp, "codex")
+            os.makedirs(home)
+            w = sqlite3.connect(os.path.join(home, "state_5.sqlite"))
+            w.execute("pragma journal_mode=wal")
+            w.execute("create table threads (id text)")
+            w.commit()
+            w.close()
+            with patch.object(codex, "CODEX_HOME", home):
+                codex.ro("state_5.sqlite").execute("select * from threads").fetchall()
+            assert os.listdir(home) == ["state_5.sqlite"], os.listdir(home)
+    finally:
+        os.umask(old)
+    config.save(config.load(reload=True))
+    assert stat.S_IMODE(os.stat(config.config_path()).st_mode) == 0o600
+    _reset_settings()
+
+
+def test_background_job_pins_every_folder_and_escapes_paths():
+    kind, files, _ = schedule.enable(15, dry_run=True)
+    if kind == "unsupported":
+        return
+    text = "".join(t for _, t in files)
+    for var in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "SESSION_MEMORY_HOME", "SESSION_MEMORY_CONFIG"):
+        assert var in text, var
+    assert ("<key>Umask</key><integer>63</integer>" in text) if kind == "launchd" else ("UMask=0077" in text)
+    assert "-P" in text or "smem" in text  # never a bare `python -m`, which imports from the current folder
+    assert schedule._quote('/a b/50%$x"y') == '"/a b/50%%$$x\\"y"'
+    try:
+        schedule._quote("/a\nb")
+        raise AssertionError("a path with a line break was accepted")
+    except SystemExit:
+        pass
+
+
+def test_skill_keeps_its_command_and_the_users_edits():
+    _reset_settings()
+    try:
+        with patch.object(skills, "command", lambda: "smem"):
+            skills.install("claude")
+        path = skills.folder("claude")
+        assert "command=smem" in open(os.path.join(path, skills.MARKER)).read()
+        marker = os.path.join(path, skills.MARKER)
+        old = open(marker).read()
+        open(marker, "w").write(old.replace(skills.__version__, "0.0.1", 1))
+        # An upgrade seen from a background job, whose PATH has no `smem`: the skill keeps `smem`.
+        with patch.object(skills, "command", lambda: "/elsewhere/python -P -m session_memory"):
+            skills.refresh_installed()
+        body = open(os.path.join(path, "SKILL.md")).read()
+        assert "Bash(smem search:*)" in body and "/elsewhere" not in body
+        assert skills._marker(path)["version"] == skills.__version__
+        # A SKILL.md the user edited is left alone by upgrades.
+        open(os.path.join(path, "SKILL.md"), "a").write("\nmy own note\n")
+        old = open(marker).read()
+        open(marker, "w").write(old.replace(skills.__version__, "0.0.1", 1))
+        skills.refresh_installed()
+        assert "my own note" in open(os.path.join(path, "SKILL.md")).read()
+        # Removing keeps files the user added to the folder.
+        open(os.path.join(path, "NOTES.md"), "w").write("mine")
+        skills.remove("claude")
+        assert os.listdir(path) == ["NOTES.md"]
+        shutil.rmtree(path)
+    finally:
+        _reset_settings()
+
+
+def test_reading_commands_handle_punctuation_names_dates_and_nothing():
+    _reset_settings()
+    try:
+        log = _claude_log("/work/c", "55555555-0000-0000-0000-000000000001", "edit config.toml for the Safari fix")
+        with open(log, "a") as f:
+            f.write(json.dumps({"type": "custom-title", "customTitle": "Checkout button bug"}) + "\n")
+        _codex_log("/work/c", "c0dec0de-0000-4000-8000-000000000005", "rename the inventory table")
+        out = _smem("setup", "--refresh", "manual", "--skills", "none").stdout
+        assert "Health: GREEN" in out, out  # a healthy new install with only two sessions isn't a warning
+        assert "[config.toml]" in _smem("search", "config.toml").stdout  # punctuation is searched literally
+        some = _smem("search", "Safari", "fix", "zeppelin").stdout  # unquoted words; no turn has all three
+        assert "some of them" in some and "[Safari]" in some, some
+        named = _smem("search", "checkout bug").stdout  # words only in the session's name
+        assert "Sessions named like this" in named and "Checkout button bug" in named, named
+        assert "inventory table" in _smem("session", "inventory table").stdout  # unnamed: found by its request
+        assert "No sessions in that time" in _smem("recent", "--since", "2030-01-01").stdout
+        assert "c0dec0de" in _smem("recent", "--since", "2026-10-01", "--until", "2026-10-15").stdout
+        assert "No Codex goals" in _smem("goals").stdout
+        assert "(no rows)" in _smem("sql", "select * from goals").stderr
+        assert "Session Memory" in _smem("--version").stdout
+        assert "Reading" in _smem().stdout  # no command: the help, not an error
+        _smem("uninstall", "--yes")
+    finally:
+        _clean_sources()
+        _reset_settings()
 
 
 if __name__ == "__main__":
