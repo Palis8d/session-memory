@@ -35,9 +35,9 @@ flowchart TB
   end
   subgraph answering["Answering: your assistant"]
     direction LR
-    D["You ask a question"] --> E["Assistant runs<br/>smem search"] --> F["Short list of<br/>dated matches"] --> G["Assistant reads the<br/>session it needs<br/>and answers you"]
+    D["You ask a question"] --> E["Assistant runs<br/>smem search<br/>on the memory file"] --> F["Short list of<br/>dated matches"] --> G["Assistant reads the<br/>session it needs<br/>and answers you"]
   end
-  C --> E
+  filing -- "searched by" --> answering
 ```
 
 ## Ask the way you'd ask a colleague
