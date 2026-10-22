@@ -294,22 +294,30 @@ def check_crosscheck(con, top_n=20, helper_n=10):
 
 
 def check_freshness(con):
-    last = (con.execute("select value from meta where key='last_update'").fetchone() or [None])[0]
+    last, changed, cchanged = changed_since_update(con)
     if not last:
         return [(RED, "freshness", "never updated; run `smem update`")]
-    last_epoch = _epoch(last)
+    level = GREEN if not (changed or cchanged) else YELLOW
+    return [(level, "freshness", f"last update {last}; since then {changed} Codex and {cchanged} Claude sessions changed"
+             + ("; run `smem update`" if level != GREEN else ""))]
+
+
+def changed_since_update(con):
+    """(last update time, Codex sessions changed since, Claude sessions changed since). Reads only file times."""
+    last = (con.execute("select value from meta where key='last_update'").fetchone() or [None])[0]
+    if not last:
+        return None, 0, 0
+    last_epoch = _epoch(last)  # whole seconds, so file times are compared in whole seconds too
     changed = cchanged = 0
     if in_use("codex"):
         try:
             st = codex.ro("state_5.sqlite")
             changed = st.execute("select count(*) from threads where updated_at > ?", (int(last_epoch),)).fetchone()[0]
         except sqlite3.Error:  # no thread table: fall back to log modification times
-            changed = sum(1 for paths in codex.scan_rollouts().values() if os.path.getmtime(paths[-1]) > last_epoch)
+            changed = sum(1 for paths in codex.scan_rollouts().values() if int(os.path.getmtime(paths[-1])) > last_epoch)
     if in_use("claude"):
-        cchanged = sum(1 for p, _, _ in claude.list_logs() if os.path.getmtime(p) > last_epoch)
-    level = GREEN if not (changed or cchanged) else YELLOW
-    return [(level, "freshness", f"last update {last}; since then {changed} Codex and {cchanged} Claude sessions changed"
-             + ("; run `smem update`" if level != GREEN else ""))]
+        cchanged = sum(1 for p, _, _ in claude.list_logs() if int(os.path.getmtime(p)) > last_epoch)
+    return last, changed, cchanged
 
 
 def check_last_run(con):

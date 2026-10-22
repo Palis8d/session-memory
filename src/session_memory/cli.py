@@ -103,6 +103,17 @@ def update_lock(wait):
         yield True
 
 
+def freshness_note(con):
+    """A plain fact under results when the memory is behind: when it was updated, and what changed since."""
+    try:
+        last, cx, cl = health.changed_since_update(con)
+    except (OSError, sqlite3.Error):
+        return
+    if last and (cx or cl):
+        print(f"\n(Memory last updated {local(last)}. Since then {cx} Codex and {cl} Claude Code sessions changed; "
+              "`smem update` reads just those.)")
+
+
 def resolve(con, q, agent=None):
     args = [q, q]
     sql = "select * from sessions where (session_id=? or session_id like ? || '%')"
@@ -169,6 +180,7 @@ def cmd_search(a):
             print(f"    YOU:   {one_line(r['req'], 220)}")
         if r["ans"].strip():
             print(f"    AGENT: {one_line(r['ans'], 220)}")
+    freshness_note(con)
 
 
 def cmd_session(a):
@@ -227,6 +239,7 @@ def cmd_session(a):
             print(f"  {f['change'] or '':7} {f['path']}")
         if len(files) > 40:
             print(f"  … and {len(files) - 40} more (smem sql lists them all)")
+    freshness_note(con)
 
 
 def cmd_recent(a):
@@ -238,6 +251,7 @@ def cmd_recent(a):
         args.append(a.agent)
     for r in con.execute(sql + " order by updated_at desc limit ?", args + [a.limit]):
         print(row_line(r))
+    freshness_note(con)
 
 
 def cmd_project(a):
@@ -252,6 +266,7 @@ def cmd_project(a):
         print(row_line(r))
         if a.answers and r["last_answer"]:
             print(f"      last answer: {one_line(r['last_answer'], 200)}")
+    freshness_note(con)
 
 
 def cmd_files(a):
@@ -265,6 +280,7 @@ def cmd_files(a):
     for r in rows:
         turn = f" turn {r['turn_index'] + 1}" if r["turn_index"] is not None else ""
         print(f"{row_line(r)}\n      {r['change'] or 'changed':7} {r['path']}{turn}")
+    freshness_note(con)
 
 
 def cmd_goals(a):

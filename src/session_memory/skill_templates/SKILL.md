@@ -35,6 +35,7 @@ These commands only read. They work inside a sandbox that blocks writing.
 
 ### Reading the output
 
+- When sessions changed after the last update, results end with a note saying when the memory was last updated and how many Claude Code and Codex sessions changed since.
 - Times are local, `YYYY-MM-DD HH:MM`. In `smem sql`, columns ending in `_at` are UTC (ISO 8601).
 - List rows show: date, assistant (`·h` marks a helper session, a sub-agent another session started), name, `t` turns, `c` commands, `f` files changed, and the start of the session id.
 - `≈` before a command count: estimated from code the assistant ran to issue commands, rather than counted from finished commands.

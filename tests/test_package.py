@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -249,8 +250,10 @@ def test_skills_install_remove_and_never_touch_others():
         mine = skills.folder("claude")
         body = open(os.path.join(mine, "SKILL.md")).read()
         assert body.startswith("---\nname: smem\n") and "allowed-tools:" in body and "{{" not in body
-        for cmd in ("update", "uninstall", "settings", "setup"):
-            assert f" {cmd}:*" not in body.split("---")[1], cmd  # only reading commands run without asking
+        front = body.split("---")[1]
+        assert " search:*" in front and " update:*" in front  # reading and updating run without asking
+        for cmd in ("uninstall", "settings", "setup", "refresh", "skills"):
+            assert f" {cmd}:*" not in front, cmd  # changing the user's setup still asks
         assert "Bash(" not in skills.render("codex")
         assert skills.remove("codex")[0] is False and os.path.exists(other)
         config.set_value("skills.claude", "false")
@@ -301,7 +304,12 @@ def test_end_to_end_setup_read_only_use_and_uninstall():
             assert _smem("health", "--fast", check=False).returncode in (0, 1)
         finally:
             os.chmod(store.DATA_DIR, stat.S_IRWXU)
+        time.sleep(1.1)  # the memory records its update time in whole seconds
+        _claude_log("/work/garden", "22222222-0000-0000-0000-000000000002", "prune the roses")
+        note = _smem("recent").stdout
+        assert "Since then 0 Codex and 1 Claude Code sessions changed" in note, note
         assert "Updated in" in _smem("update").stdout
+        assert "Since then" not in _smem("recent").stdout
         for agent in ("claude", "codex"):
             assert os.path.exists(os.path.join(config.skills_dir(agent), "smem", "SKILL.md"))
         listing = _smem("uninstall", "--dry-run").stdout
