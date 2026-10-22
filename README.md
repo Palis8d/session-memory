@@ -28,13 +28,16 @@ Claude Code and Codex start each new session without your earlier ones. smem giv
 Your computer does the filing; your assistant does the reading and thinking.
 
 ```mermaid
-flowchart LR
-  A["Claude Code and Codex<br/>save every session<br/>as text files"] --> B["smem update<br/>ordinary program, no AI<br/>reads only changed files"]
-  B --> C[("Memory file<br/>requests, answers, files changed<br/>plus a word index")]
-  D["You ask your assistant"] --> E["Assistant runs<br/>smem search"]
+flowchart TB
+  subgraph filing["Filing: your computer, no AI, no tokens"]
+    direction LR
+    A["Claude Code and Codex<br/>save each session<br/>as a text file"] --> B["smem update copies<br/>requests, answers,<br/>files changed"] --> C[("Memory file<br/>with a word index")]
+  end
+  subgraph answering["Answering: your assistant"]
+    direction LR
+    D["You ask a question"] --> E["Assistant runs<br/>smem search"] --> F["Short list of<br/>dated matches"] --> G["Assistant reads the<br/>session it needs<br/>and answers you"]
+  end
   C --> E
-  E --> F["Short list of dated matches<br/>a few hundred to ~1,300 tokens"]
-  F --> G["Assistant opens the one<br/>session it needs and answers"]
 ```
 
 ## Ask the way you'd ask a colleague
