@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/Palis8d/session-memory/main/install
 
 - **One memory for both assistants.** Your requests, their answers, files changed, goals, and how sessions connect. Claude Code can find what Codex did, and the other way round.
 - **Skills for Claude Code and Codex**, so each assistant knows how to use the memory without you explaining it.
-- **Stays current if you want it to:** automatically every 15 minutes, only when asked, or never. Your choice, changeable any time.
+- **Stays current your way:** automatically every 15 minutes, only when needed, or never. See below.
 - **Health checks** that notice when Claude Code or Codex change how they write their logs, so the memory doesn't quietly fall behind.
 
 ## Use it
@@ -40,6 +40,16 @@ smem project myapp            # one project's sessions
 ```
 
 `smem --help` lists every command.
+
+## Keeping it current, and what it costs
+
+Updating the memory uses no AI and no tokens. It's your computer reading log files, and it reads only the ones that changed since last time.
+
+- **Auto** (every 15 minutes): the memory is always ready, and answers come instantly.
+- **Manual**: nothing runs in the background. When results are out of date, they end with a plain note, for example "Since then 2 Claude Code sessions changed." The assistant can then update first, which takes seconds. Claude Code may do this without asking you; in Codex, its sandbox setting decides whether it asks.
+- **Off**: nothing updates. Search still works on what's stored.
+
+Either way, the memory saves tokens. Without it, an assistant looking for an old task has to read long raw log files. With it, the assistant reads a short list of matches and then only the session it needs.
 
 ## Your data stays yours
 
