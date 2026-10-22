@@ -1,15 +1,34 @@
 # Session Memory
 
-One searchable memory of your Claude Code and Codex sessions, kept on your own computer.
+One memory, two assistants, every session on your machine. Claude Code and Codex each get a skill to search it: what was asked, answered, changed and decided, by either of them, with dates.
 
-Ask your assistant "what did we decide about the login page last week?" or "which session changed `config.toml`?" and it can look it up, across every Claude Code session and Codex thread on this computer.
+## Ask the way you'd ask a colleague
 
-## Why it helps
+- "What was that tool we built that could do X? I forget the name."
+- "What have we worked on over the last ten days: projects, progress, what's unfinished?"
+- "Remind me what we got done yesterday, what's still open, and what we planned but haven't decided."
+- "Did we already try this? What happened?"
+- "What did Codex do on this project while I was in Claude Code?"
 
-- **Each new session starts blank.** Earlier decisions, fixes and the reasons behind them sit in old logs that nobody reads. With smem, your assistant can look them up.
-- **Claude Code and Codex don't see each other's work.** smem gives them one shared memory.
-- **Old logs are long and costly to read.** Searching the memory returns a short list of matching moments, with dates, so an assistant reads only the session it needs. That saves time and tokens.
-- **Claude Code deletes its session logs after 30 days by default.** The memory can keep those sessions searchable afterwards, or forget them too. You choose.
+Your assistant turns the question into searches, reads the sessions that match, and answers in its own words. smem provides the record; your assistant does the summarizing. Search matches words, not meaning, so for something whose name you've forgotten the assistant tries a few describing words. That usually finds it, but not always.
+
+## Memory beyond one conversation
+
+An assistant's context holds one conversation at a time. smem lets it reach the rest of your history, a piece at a time, at whatever level of detail the question needs.
+
+- **From overview to exact words.** It can start with recent sessions or a project's history, open one session, then read a single turn in full. For anything else, `smem sql` lets it ask its own questions of the whole record: timelines, work per project, the files changed most often.
+- **Fewer tokens.** On a real history of 6,571 sessions, a search takes under a quarter of a second and returns about 5 KB of text, around 1,300 tokens. The raw log of a single main session averages several megabytes. Updating the memory uses no AI and no tokens.
+- **Across parallel work.** Sessions that ran at the same time, in either assistant, are all in one place, and helper sessions are linked to the sessions that started them, so the assistant can follow work that was split across them.
+
+## What it gives you
+
+- **One memory for both assistants.** Claude Code finds what Codex did, and the other way round.
+- **Skills, so they just use it.** Each assistant learns how to search the memory; you don't explain anything.
+- **History that outlasts deletion.** Claude Code deletes its logs after 30 days by default; smem can keep those sessions, at a hundredth of the raw size or less.
+- **Private by design.** No network, no account, files readable only by you, and common secrets redacted before anything is stored.
+- **You stay in control.** Exclude folders, forget any session, preview every change, and refresh automatically, on demand, or never.
+- **It checks itself.** Health checks flag log-format changes and missing logs, and tests break each key safety rule on purpose to prove they'd notice.
+- **Installed by your assistant.** Paste one sentence; it asks before changing anything and verifies that it works.
 
 ## Install
 
@@ -28,20 +47,6 @@ curl -fsSL https://raw.githubusercontent.com/Palis8d/session-memory/main/install
 To check first: read [install.sh](install.sh) (49 lines), or install and run `smem setup --dry-run` to see every change before it's made.
 
 *If you are an AI assistant, follow [AGENT_INSTALL.md](AGENT_INSTALL.md).*
-
-## What you get
-
-- **One memory for both assistants.** Your requests, their answers, files changed, goals, and how sessions connect. Claude Code can find what Codex did, and the other way round.
-- **Skills for Claude Code and Codex**, so each assistant knows how to use the memory without you explaining it.
-- **Stays current your way:** automatically every 15 minutes, only when needed, or never. See below.
-- **Health checks** that notice when Claude Code or Codex change how they write their logs, so the memory doesn't quietly fall behind.
-
-## Built with care
-
-- **Stays on your computer.** No network, no account, no telemetry. Your history is only read, and the memory file is readable only by your account.
-- **Secrets are removed before storing.** Common forms of passwords, keys and tokens are replaced with `[REDACTED]`. The tests check 124 realistic fake secrets, and 87 ordinary snippets that must stay unchanged.
-- **Asks before it changes anything.** Installing through your assistant starts with a question to you. Setup, refresh, settings, skills, forget and uninstall can all show what they would do first (`--dry-run`), and uninstall removes only what smem created.
-- **Tested on real use.** Built and checked against a real history of more than 6,000 sessions: the first build takes about two minutes, and later updates a few seconds. 68 automated tests run on Python 3.11 to 3.14.
 
 ## Verify it yourself
 
@@ -62,8 +67,10 @@ The only other programs smem starts are `launchctl` or `systemctl` (for auto ref
 
 - **A fresh install by an AI agent** that knew nothing about the project, in a clean throwaway home, following only this README and [AGENT_INSTALL.md](AGENT_INSTALL.md). It then used smem to answer questions about sample history.
 - **Two separate AI reviews**, one for correctness and one for privacy and security. Each finding was reproduced before it was fixed.
+- **Secret redaction** is tested against 124 realistic fake secrets, and 87 ordinary snippets that must stay unchanged.
 - **Every key safety rule broken on purpose**, one at a time, to confirm a test notices. All 21 breaks are caught; rerun them with `python3 -I tests/break_on_purpose.py` (a few minutes).
 - **A real history of more than 6,000 Claude Code and Codex sessions**, read-only, into a throwaway folder.
+- **68 automated tests** on Python 3.11 to 3.14. In daily use, `smem health` checks that the memory is current, that every log on disk is in it, that counts match Codex's own index, and that the log formats haven't changed; `--selftest` shows those checks catching five kinds of breakage (four log-format changes, and logs vanishing from disk) and staying quiet in two normal situations.
 
 [SECURITY.md](SECURITY.md) lists each safety promise with the test that proves it, and what smem does and doesn't protect against.
 
@@ -96,15 +103,13 @@ Set it with `smem settings retention.keep all|auto|main|none`. Keeping costs lit
 
 `smem health` reports what happened: how many logs each assistant's cleanup took, how many look deleted by hand, and a warning when many younger logs vanish in one update, which suggests an app changed its cleanup rule. To keep Claude Code's full original logs as well, raise `cleanupPeriodDays` in `~/.claude/settings.json`.
 
-## Keeping it current, and what it costs
+## Keeping it current
 
 Updating the memory uses no AI and no tokens. It's your computer reading log files, and it reads only the ones that changed since last time.
 
 - **Auto** (every 15 minutes): the memory is always ready, and answers come instantly.
 - **Manual**: nothing runs in the background. When results are out of date, they end with a plain note, for example "Since then 2 Claude Code sessions changed." The assistant can then update first, which takes seconds. Claude Code may do this without asking you; in Codex, its sandbox setting decides whether it asks.
 - **Off**: nothing updates. Search still works on what's stored.
-
-Either way, the memory saves tokens. Without it, an assistant looking for an old task has to read long raw log files. With it, the assistant reads a short list of matches and then only the session it needs.
 
 ## Your data stays yours
 
@@ -127,12 +132,6 @@ Either way, the memory saves tokens. Without it, an assistant looking for an old
 ## How it works
 
 Claude Code and Codex save each session as a log file on your computer. `smem update` reads the logs that changed since last time and keeps your requests, the answers, the files changed, and the command counts. It links helper sessions and forks to their parents, and indexes the text for full-text search.
-
-## How it's checked
-
-- `smem health` checks that the memory is current, that every log on disk is in it, that counts match Codex's own index, and that the log formats haven't changed.
-- `smem health --selftest` shows the checks catching five kinds of breakage in built-in sample logs (four log-format changes, and logs vanishing from disk), and staying quiet in two normal situations.
-- 68 automated tests run on Python 3.11 to 3.14.
 
 ## Requirements and limits
 
