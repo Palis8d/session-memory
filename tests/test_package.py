@@ -251,8 +251,8 @@ def test_skills_install_remove_and_never_touch_others():
         body = open(os.path.join(mine, "SKILL.md")).read()
         assert body.startswith("---\nname: smem\n") and "allowed-tools:" in body and "{{" not in body
         front = body.split("---")[1]
-        assert " search:*" in front and " update:*" in front  # reading and updating run without asking
-        for cmd in ("uninstall", "settings", "setup", "refresh", "skills"):
+        assert " search:*" in front and " update)" in front  # reading and a plain update run without asking
+        for cmd in ("update", "uninstall", "settings", "setup", "refresh", "skills"):
             assert f" {cmd}:*" not in front, cmd  # changing the user's setup still asks
         assert "Bash(" not in skills.render("codex")
         assert skills.remove("codex")[0] is False and os.path.exists(other)
@@ -308,6 +308,11 @@ def test_end_to_end_setup_read_only_use_and_uninstall():
         _claude_log("/work/garden", "22222222-0000-0000-0000-000000000002", "prune the roses")
         note = _smem("recent").stdout
         assert "Since then 0 Codex and 1 Claude Code sessions changed" in note, note
+        _smem("refresh", "auto")  # the background job (recorded, not run) updated recently enough: no note
+        assert "Since then" not in _smem("recent").stdout
+        _smem("refresh", "off")  # off: the note states the fact without suggesting an update that would refuse
+        assert "refresh is off in settings" in _smem("recent").stdout
+        _smem("refresh", "manual")
         assert "Updated in" in _smem("update").stdout
         assert "Since then" not in _smem("recent").stdout
         for agent in ("claude", "codex"):

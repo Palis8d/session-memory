@@ -18,7 +18,6 @@ LABELS = {"claude": "Claude Code", "codex": "Codex"}
 TEMPLATE = os.path.join(store.PACKAGE_DIR, "skill_templates", "SKILL.md")
 READ_COMMANDS = ("search", "session", "recent", "project", "files", "goals", "links", "stats", "sql", "schema",
                  "health")
-NO_ASK = READ_COMMANDS + ("update",)
 
 
 def folder(agent):
@@ -49,8 +48,11 @@ def render(agent, cmd=None):
     extra = ""
     if agent == "claude":
         # Claude Code may read and update the memory without asking: an update only reads the assistants' logs
-        # and writes smem's own memory file. Setup, settings, refresh, skills and uninstall still ask.
-        extra = "allowed-tools: " + ", ".join(f"Bash({cmd} {c}:*)" for c in NO_ASK) + "\n"
+        # and writes smem's own memory file. Only the plain `update` is allowed: its options override the user's
+        # choices (--force runs when refresh is off, --accept-removals lifts the mass-removal guard), so they ask,
+        # as do setup, settings, refresh, skills and uninstall.
+        allowed = [f"Bash({cmd} {c}:*)" for c in READ_COMMANDS] + [f"Bash({cmd} update)"]
+        extra = "allowed-tools: " + ", ".join(allowed) + "\n"
     note = "" if cmd == NAME else f"\n`smem` isn't on this computer's PATH, so run it as `{cmd}`.\n"
     return text.replace("{{FRONTMATTER_EXTRA}}", extra).replace("{{COMMAND_NOTE}}", note)
 

@@ -104,14 +104,21 @@ def update_lock(wait):
 
 
 def freshness_note(con):
-    """A plain fact under results when the memory is behind: when it was updated, and what changed since."""
+    """A plain fact under results when the memory is behind: when it was updated, and what changed since.
+
+    With auto refresh the note appears only when the background job seems to have stopped (no update for two
+    intervals); otherwise it would show on nearly every read, since the asking session itself keeps changing."""
+    refresh = config.load()["refresh"]
     try:
         last, cx, cl = health.changed_since_update(con)
     except (OSError, sqlite3.Error):
         return
-    if last and (cx or cl):
-        print(f"\n(Memory last updated {local(last)}. Since then {cx} Codex and {cl} Claude Code sessions changed; "
-              "`smem update` reads just those.)")
+    if not last or not (cx or cl):
+        return
+    if refresh["mode"] == "auto" and time.time() - health._epoch(last) < 2 * 60 * refresh["interval_minutes"]:
+        return
+    hint = "; `smem update` reads just those" if refresh["mode"] != "off" else "; refresh is off in settings"
+    print(f"\n(Memory last updated {local(last)}. Since then {cx} Codex and {cl} Claude Code sessions changed{hint}.)")
 
 
 def resolve(con, q, agent=None):

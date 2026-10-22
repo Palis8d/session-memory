@@ -22,7 +22,7 @@ Tell them, in about these words, naming only the assistants you found:
 > Session Memory reads your Claude Code and Codex history on this computer and builds a private, searchable memory of it in `~/.local/share/session-memory`. It never changes your history, and nothing leaves this computer. It adds the `smem` program, and a skill so Claude Code and Codex know how to use it.
 >
 > 1. OK to install it and connect your Claude Code and Codex history?
-> 2. Keep it up to date automatically every 15 minutes (fastest answers), only when needed (nothing runs in the background; I update it first when it's behind), or never? Updating uses no AI and no tokens.
+> 2. Keep it up to date automatically every 15 minutes (fastest answers), only when needed (nothing runs in the background; I can update it first when it's behind), or never? Updating uses no AI and no tokens.
 > 3. Any folders whose sessions should never be stored? (Optional.)
 
 Wait for a clear yes before going on. If they say no, stop.
