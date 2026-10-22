@@ -23,7 +23,8 @@ Tell them, in about these words, naming only the assistants you found:
 >
 > 1. OK to install it and connect your Claude Code and Codex history?
 > 2. Keep it up to date automatically every 15 minutes (fastest answers), only when needed (nothing runs in the background; I can update it first when it's behind), or never? Updating uses no AI and no tokens.
-> 3. Any folders whose sessions should never be stored? (Optional.)
+> 3. Claude Code deletes its session logs after 30 days. When an assistant deletes a log, should the memory keep that session (recommended), keep only main sessions, or forget it too?
+> 4. Any folders whose sessions should never be stored? (Optional.)
 
 Wait for a clear yes before going on. If they say no, stop.
 
@@ -43,10 +44,10 @@ Inside a sandbox that blocks writing outside the project (Codex, for example), i
 
 ## 4. Set it up
 
-Match `--refresh` to the user's answer: `auto`, `manual` or `off`.
+Match `--refresh` to the user's answer (`auto`, `manual` or `off`) and `--keep` to theirs (`all`, `main` or `none`).
 
 ```bash
-smem setup --refresh auto --skills all
+smem setup --refresh auto --keep all --skills all
 ```
 
 If the user named folders to keep out, add `--exclude FOLDER` once for each one, using its full path (for example `--exclude ~/clients/acme`).
@@ -83,10 +84,11 @@ GREEN means all is well, and a fresh install should be GREEN. A YELLOW line is a
 
 Say what is installed, how many sessions are in memory and from what date, and the refresh mode. Tell them they can now ask Claude Code or Codex about past work in their own words. New sessions pick up the skill.
 
-If the user has Claude Code, also tell them: Claude Code deletes its own session logs after 30 days by default, and the memory only keeps what's on disk. If they want more kept, offer to raise `cleanupPeriodDays` in `~/.claude/settings.json` (for example to 3650), and change it only if they say yes.
+If the user has Claude Code, also tell them: Claude Code deletes its own session logs after 30 days by default. The memory keeps what their `--keep` answer says, but it stores only requests and answers, not the full logs. If they want the full logs kept too, offer to raise `cleanupPeriodDays` in `~/.claude/settings.json` (for example to 36500), and change it only if they say yes.
 
 ## Later
 
 - Change the refresh: `smem refresh auto|manual|off --every 30`
-- See or change settings: `smem settings`, `smem settings KEY VALUE`
+- See or change settings: `smem settings`, `smem settings KEY VALUE` (for example `smem settings retention.keep main`)
+- Erase one session for good: `smem forget ID --dry-run`, then with the user's yes `smem forget ID --yes`
 - Remove everything it added: `smem uninstall` lists what it would remove; with the user's yes, run `smem uninstall --yes`. The user's history is never touched. Then remove the program with `uv tool uninstall session-memory` (or `pipx uninstall session-memory`).

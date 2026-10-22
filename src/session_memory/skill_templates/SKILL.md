@@ -46,6 +46,7 @@ These commands only read. They work inside a sandbox that blocks writing.
 - Forks start with a copy of their parent's turns. Those copies are left out, and their number is shown as inherited turns.
 - A helper's "inherited context" is its parent's text, not the helper's own request. A Codex helper's own brief is often not readable in its log.
 - Text longer than 200,000 characters is cut; the original log has the rest.
+- A session can outlive its log: when an assistant deletes a log, `retention.keep` decides whether the memory keeps the session (`all`, `main` or `none`). `smem session` then says "its log was deleted", and `smem stats` counts these sessions. In `smem sql` they have `log_deleted_at` set.
 - Common forms of passwords, keys and tokens are stored as `[REDACTED]` (best effort: unusual formats can get through).
 
 ### Not recorded
@@ -66,7 +67,9 @@ The settings belong to the user. They live in one TOML file.
 - `smem settings` shows every setting and the file's path; `smem settings KEY` shows one. `smem settings KEY VALUE` replaces one value, for example `smem settings privacy.exclude_paths '["~/private"]'` (a list is replaced whole).
 - `sources.*`: which assistants' history is read, and from which folders.
 - `privacy.exclude_paths` (full folder paths), `privacy.exclude_projects`: sessions never stored. The next update removes them and erases their text from the file.
+- `retention.keep`: `all`, `main` or `none`, as above.
+- `smem forget ID` erases one session, and the helper sessions it started, for good: its text leaves the file and updates won't read it back. It needs the whole id or at least 8 characters, and `--yes` (or a yes typed in a terminal). `--dry-run` shows what it would erase, `--list` shows forgotten sessions, and `--undo ID` lets updates read one again. It never touches the assistants' logs.
 - `refresh.mode`, `refresh.interval_minutes`: also set with `smem refresh auto|manual|off --every N`.
 - `skills.*`: which assistants get this skill. `smem skills` shows where each skill is.
 - `smem uninstall` lists what it would remove: the skills, the background job, the settings and the record. It removes them only with `--yes`, or after a yes typed in a terminal. It never touches the assistants' own history. `--keep-data` keeps the record, and `--dry-run` only lists.
-- `setup`, `refresh`, `settings`, `skills` and `uninstall` accept `--dry-run`.
+- `setup`, `refresh`, `settings`, `skills`, `forget` and `uninstall` accept `--dry-run`.

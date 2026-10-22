@@ -20,6 +20,7 @@ Keeping it current
 Setup
   smem setup                    settings, skills, refresh, first build and checks, in one step
   smem settings [KEY VALUE]     show or change a setting
+  smem forget ID                erase one session from the memory for good
   smem skills [install|remove]  the Claude Code and Codex skills
   smem uninstall                remove everything smem added
 
@@ -277,6 +278,9 @@ def cmd_session(a):
     est = f" (≈{s['commands_estimated']} estimated from code-mode source)" if s["commands_estimated"] else ""
     print(f"  {local(s['created_at'])} → {local(s['updated_at'])}  turns {s['turn_count']}  commands {s['command_count']}{est}"
           f"  files {s['file_change_count']}  MCP {s['mcp_count']}  helpers {s['helper_count']}")
+    if s["log_deleted_at"]:
+        print(f"  its log was deleted (noticed {local(s['log_deleted_at'])}); the memory keeps it "
+              "(settings: retention.keep; `smem forget` erases it)")
     if s["inherited_turns"]:
         print(f"  {s['inherited_turns']} leading turns copied from the parent thread are not shown as this session's work")
     if s["helper_role"]:
@@ -418,6 +422,11 @@ def cmd_stats(a):
               f"  {r['files'] or 0:6} files  {local(r['first'])} → {local(r['last'])}")
     for k in ("links", "goals"):
         print(f"{k}: {con.execute(f'select count(*) from {k}').fetchone()[0]}")
+    kept = con.execute("select count(*) from sessions where log_deleted_at is not null").fetchone()[0]
+    forgotten = sum(len(v) for v in json.loads(
+        (con.execute("select value from meta where key='forgotten'").fetchone() or ["{}"])[0]).values())
+    print(f"kept after their logs were deleted: {kept}   forgotten: {forgotten}   "
+          f"(retention.keep = {config.load()['retention']['keep']})")
     last = con.execute("select value from meta where key='last_update'").fetchone()
     mode = config.load()["refresh"]
     every = f" every {mode['interval_minutes']} minutes" if mode["mode"] == "auto" else ""
@@ -445,6 +454,89 @@ def cmd_sql(a):
             break
     if n == 0 and not a.json:
         print("(no rows)", file=sys.stderr)
+
+
+def _forgotten(con):
+    return {k: set(v) for k, v in json.loads(
+        (con.execute("select value from meta where key='forgotten'").fetchone() or ["{}"])[0]).items()}
+
+
+def _save_forgotten(con, forgotten):
+    con.execute("insert or replace into meta values ('forgotten', ?)",
+                (json.dumps({k: sorted(v) for k, v in forgotten.items() if v}),))
+
+
+def cmd_forget(a):
+    """Erase sessions for good: their text leaves the file, and updates won't read them again."""
+    if a.list:
+        forgotten = _forgotten(reader())
+        for agent, ids in sorted(forgotten.items()):
+            for sid in sorted(ids):
+                print(f"{agent:6} {sid}")
+        if not any(forgotten.values()):
+            print("No sessions are forgotten.")
+        return
+    if not a.ids:
+        sys.exit("Name the sessions to forget by id (`smem recent` and `smem search` show ids).")
+    with update_lock(wait=True):
+        con, outdated = writer()
+        if outdated:
+            sys.exit("The memory needs a rebuild first: run `smem update`.")
+        forgotten = _forgotten(con)
+        if a.undo:
+            for q in a.ids:
+                agent = next((ag for ag, ids in forgotten.items() if q in ids), None)
+                if not agent:
+                    sys.exit(f"{q!r} isn't forgotten (`smem forget --list` shows the full ids).")
+                if not a.dry_run:
+                    forgotten[agent].discard(q)
+                print(f"{'Would bring back' if a.dry_run else 'Brought back'} {agent} {q}; the next update reads it "
+                      "again if its log still exists.")
+            if not a.dry_run:
+                _save_forgotten(con, forgotten)
+                con.commit()
+            return
+        targets = []
+        for q in a.ids:
+            rows = con.execute("select * from sessions where session_id=? or session_id like ? || '%'", (q, q)).fetchall()
+            exact = [r for r in rows if r["session_id"] == q]
+            if not exact and len(q) < 8:
+                sys.exit(f"Give at least 8 characters of the id, not {q!r}: forgetting can't be undone.")
+            if not rows:
+                sys.exit(f"No session has an id starting with {q!r}.")
+            if not exact and len(rows) > 1:
+                print(f"{q!r} matches {len(rows)} sessions; give more of the id:")
+                for r in rows:
+                    print("  " + row_line(r))
+                sys.exit(1)
+            stack = [(exact or rows)[0]]
+            while stack:  # the session, and the helper sessions it started (they hold its work)
+                r = stack.pop()
+                if (r["agent"], r["session_id"]) not in {(t["agent"], t["session_id"]) for t in targets}:
+                    targets.append(r)
+                    stack += con.execute("select * from sessions where agent=? and parent_id=? and parent_rel='helper'",
+                                         (r["agent"], r["session_id"])).fetchall()
+        print(f"Forgetting erases {plural(len(targets), 'session')} from the memory for good "
+              "(their logs, if any, aren't touched):")
+        for r in targets:
+            print("  " + row_line(r))
+        if a.dry_run:
+            return
+        if not a.yes:
+            if not sys.stdin.isatty():
+                sys.exit("Run again with --yes to forget them.")
+            if input("Forget them? [y/N] ").strip().lower() not in ("y", "yes"):
+                sys.exit("Nothing forgotten.")
+        for r in targets:
+            store.delete_session(con, r["agent"], r["session_id"])
+            con.execute("delete from mentions where agent=? and session_id=?", (r["agent"], r["session_id"]))
+            forgotten.setdefault(r["agent"], set()).add(r["session_id"])
+        _save_forgotten(con, forgotten)
+        ingest.rebuild_links(con)
+        con.commit()
+        store.purge_deleted(con)  # erase the text from the file, not only from the index
+        con.close()
+    print("Forgotten. Updates won't read them again; `smem forget --undo ID` reverses that.")
 
 
 def cmd_schema(a):
@@ -502,6 +594,8 @@ def summary(s):
            "whose logs are gone": s.get("codex_removed", 0) + s.get("claude_removed", 0)}
     if any(why.values()):
         parts.append("Removed " + ", ".join(f"{plural(n, 'session')} {w}" for w, n in why.items() if n))
+    if s.get("kept_after_log_deleted"):
+        parts.append(f"Kept {plural(s['kept_after_log_deleted'], 'session')} whose logs were deleted")
     if s["failures"]:
         parts.append(f"{plural(len(s['failures']), 'problem')} (smem health explains)")
     return f"Updated in {s.get('seconds', '?')}s. " + ". ".join(parts) + "."
@@ -705,6 +799,8 @@ def cmd_setup(a):
         cfg["refresh"]["mode"] = a.refresh
     if a.every:
         cfg["refresh"]["interval_minutes"] = a.every
+    if a.keep:
+        cfg["retention"]["keep"] = a.keep
     if a.skills is not None:
         chosen = _list(a.skills)
         for agent in skills.AGENTS:
@@ -939,6 +1035,13 @@ def parser():
     p.add_argument("value", nargs="?")
     p.add_argument("--dry-run", action="store_true")
 
+    p = cmd("forget", cmd_forget, "erase sessions (and the helpers they started) from the memory for good")
+    p.add_argument("ids", nargs="*", metavar="ID", help="session ids (at least 8 characters, or the whole id)")
+    p.add_argument("--undo", action="store_true", help="let updates read these sessions again")
+    p.add_argument("--list", action="store_true", help="show the forgotten sessions")
+    p.add_argument("--yes", action="store_true", help="don't ask for confirmation")
+    p.add_argument("--dry-run", action="store_true", help="show what would be forgotten")
+
     p = cmd("skills", cmd_skills, "show, install or remove the Claude Code and Codex skills")
     p.add_argument("action", nargs="?", choices=["install", "remove"])
     p.add_argument("--only", choices=AGENT_CHOICES)
@@ -947,6 +1050,9 @@ def parser():
     p = cmd("setup", cmd_setup, "settings, skills, refresh, first build and checks, in one step")
     p.add_argument("--refresh", choices=["auto", "manual", "off"], help="how the memory stays current (default: keep current)")
     p.add_argument("--every", type=int, metavar="MINUTES", help="how often auto refreshes (default 15)")
+    p.add_argument("--keep", choices=["all", "main", "none"],
+                   help="after an assistant deletes a session's log: keep all sessions, main ones only, or none "
+                        "(default: keep current; new installs keep all)")
     p.add_argument("--skills", metavar="LIST", help="claude,codex | all | none (default: keep current)")
     p.add_argument("--sources", metavar="LIST", help="whose history to read: claude,codex | all (default: keep current)")
     p.add_argument("--exclude", action="append", metavar="PATH", help="never store sessions run inside PATH (repeatable)")

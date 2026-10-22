@@ -14,7 +14,7 @@ _DB_NAME = os.environ.get("SESSION_MEMORY_DB_NAME", "memory.sqlite")
 if os.path.basename(_DB_NAME) != _DB_NAME or _DB_NAME in ("", ".", ".."):
     raise SystemExit(f"SESSION_MEMORY_DB_NAME must be a plain file name, not {_DB_NAME!r}")
 DB_PATH = os.path.join(DATA_DIR, _DB_NAME)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 create table if not exists meta (key text primary key, value text);
@@ -65,6 +65,7 @@ create table if not exists sessions (
   last_answer text,
   unknown_types text,               -- json {type: count} not recognized by the adapter
   ingested_at text,
+  log_deleted_at text,              -- when smem found the log gone; the session is kept (settings: retention.keep)
   primary key (agent, session_id)
 );
 create index if not exists idx_sessions_updated on sessions(updated_at);
@@ -452,6 +453,25 @@ def query_only(con):
     con.execute("pragma query_only=on")
     con.set_authorizer(_read_only_authorizer)
     return con
+
+
+def copy_sessions(src, dst, agent, ids):
+    """Copy whole sessions (metadata, turns, search text, files, mentions) from one store into another, by
+    the columns both have, so a store built by an older version can hand its sessions on."""
+    ids = list(ids)
+    for table in ("sessions", "turns", "files_touched", "mentions", "turns_fts"):
+        have = [r[1] for r in src.execute(f"pragma table_info({table})")]
+        want = {r[1] for r in dst.execute(f"pragma table_info({table})")}
+        cols = [c for c in have if c in want]
+        if not cols:
+            continue
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            rows = src.execute(f"select {','.join(cols)} from {table} where agent=? and session_id in "
+                               f"({','.join('?' * len(chunk))})", [agent] + chunk).fetchall()
+            verb = "insert" if table == "turns_fts" else "insert or replace"  # the text index takes plain inserts
+            dst.executemany(f"{verb} into {table} ({','.join(cols)}) values ({','.join('?' * len(cols))})",
+                            [tuple(r) for r in rows])
 
 
 def delete_session(con, agent, sid):

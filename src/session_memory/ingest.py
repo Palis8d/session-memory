@@ -70,23 +70,75 @@ def _refresh_metadata(con, rec):
                  rec.get("log_path"), rec["session_id"]))
 
 
-def _reconcile(con, agent, present, stats, log, accept_removals=False):
-    """Remove sessions whose source is gone from both Codex's thread table and the disk."""
-    stored = {r[0] for r in con.execute("select session_id from sessions where agent=?", (agent,))}
-    gone = stored - present
+def _keeps(keep, kind):
+    """Whether retention.keep holds on to a session of this kind after its log is deleted."""
+    return keep == "all" or (keep == "main" and kind != "helper")
+
+
+def _mark_kept(con, agent, ids, stats):
+    ids = list(ids)
+    if ids:
+        stamp = store.now_iso()
+        con.executemany("update sessions set log_deleted_at=coalesce(log_deleted_at, ?) where agent=? and session_id=?",
+                        [(stamp, agent, s) for s in ids])
+        stats["kept_after_log_deleted"] = stats.get("kept_after_log_deleted", 0) + len(ids)
+
+
+def _reconcile(con, agent, present, stats, log, accept_removals=False, keep="all", with_log=None):
+    """Sessions whose source is gone (from disk, and for Codex from its thread table too) are kept and
+    marked, or removed, as retention.keep says. A session whose log is back loses its mark."""
+    with_log = present if with_log is None else with_log
+    rows = {r[0]: (r[1], r[2]) for r in con.execute(
+        "select session_id, kind, log_deleted_at from sessions where agent=?", (agent,))}
+    back = [s for s, (_, gone_at) in rows.items() if gone_at and s in with_log]
+    con.executemany("update sessions set log_deleted_at=null where agent=? and session_id=?", [(agent, s) for s in back])
+    gone = set(rows) - present
     if not gone:
         return
-    if len(gone) > MAX_VANISH_SHARE * max(1, len(stored)) and not accept_removals:
+    # Many logs vanishing at once looks like an unmounted drive, not deletion: nothing is marked or removed,
+    # and the guard keeps the discovery baseline so health raises the alarm. Sessions already known to be
+    # gone (kept until the user changed retention.keep) don't count toward it.
+    new = [s for s in gone if not rows[s][1]]
+    if len(new) > MAX_VANISH_SHARE * max(1, len(rows)) and not accept_removals:
         stats["failures"].append({"kind": "guard", "path": agent,
-                                  "error": f"{len(gone)} of {len(stored)} sessions vanished at once; "
+                                  "error": f"{len(new)} of {len(rows)} sessions vanished at once; "
                                                          "kept them (drive unmounted or unreadable?). If the removal "
                                                          "is real, run `smem update --accept-removals`"})
         return
-    for sid in gone:
+    kept = {s for s in gone if _keeps(keep, rows[s][0])}
+    _mark_kept(con, agent, [s for s in kept if not rows[s][1]], stats)
+    drop = gone - kept
+    if not drop:
+        return
+    for sid in drop:
         store.delete_session(con, agent, sid)
         con.execute("delete from mentions where agent=? and session_id=?", (agent, sid))
-    stats[f"{agent}_removed"] = len(gone)
-    log(f"{agent}: removed {len(gone)} sessions whose source no longer exists")
+    stats[f"{agent}_removed"] = len(drop)
+    log(f"{agent}: removed {len(drop)} sessions whose log no longer exists")
+
+
+def _carry_kept(previous, con, agent, keep, ignore, stats, accept_removals=False):
+    """A full rebuild reads only the logs on disk; hand on the sessions kept after their logs were deleted.
+    Refuses, like _check_shrink, when many logs vanished since the last update (drive unmounted?)."""
+    now = {r[0] for r in con.execute("select session_id from sessions where agent=?", (agent,))}
+    old = {r[0]: r[1] for r in previous.execute("select session_id, kind from sessions where agent=?", (agent,))}
+    missing = [s for s in old if s not in now and s not in ignore]
+    new = set(missing) - _known_gone(previous, agent)
+    if new and len(new) > MAX_VANISH_SHARE * len(old) and not accept_removals:
+        raise RuntimeError(f"rebuild is missing {len(new)} of the store's {len(old)} {agent} sessions; keeping the "
+                           "current store (drive unmounted?). If the removal is real, add --accept-removals")
+    ids = [s for s in missing if _keeps(keep, old[s])]
+    if ids:
+        store.copy_sessions(previous, con, agent, ids)
+        _mark_kept(con, agent, ids, stats)
+
+
+def _known_gone(previous, agent):
+    try:
+        return {r[0] for r in previous.execute(
+            "select session_id from sessions where agent=? and log_deleted_at is not null", (agent,))}
+    except sqlite3.OperationalError:  # a store from before log_deleted_at existed
+        return set()
 
 
 def _check_shrink(previous, new, agent, stats, accept_removals, ignore=()):
@@ -94,7 +146,7 @@ def _check_shrink(previous, new, agent, stats, accept_removals, ignore=()):
     six sessions replaced by six different ones counts as six lost."""
     old = {r[0] for r in previous.execute("select session_id from sessions where agent=?", (agent,))}
     now = {r[0] for r in new.execute("select session_id from sessions where agent=?", (agent,))}
-    lost = old - now - set(ignore)  # sessions the user excluded aren't "lost"
+    lost = old - now - set(ignore) - _known_gone(previous, agent)  # excluded or already-gone sessions aren't "lost"
     if lost and len(lost) > MAX_VANISH_SHARE * len(old) and not accept_removals:
         raise RuntimeError(f"rebuild is missing {len(lost)} of the store's {len(old)} {agent} sessions; keeping the "
                            "current store (drive unmounted?). If the removal is real, add --accept-removals")
@@ -130,8 +182,7 @@ def _claude_dir_excluded(path, excluded_paths):
     """Claude names each project folder after its working folder (non-alphanumerics become '-'), so an
     excluded folder's own logs can be skipped before they're opened. Only an exact match counts: the name
     doesn't show where folder names end, so sessions in subfolders are caught later by their recorded cwd."""
-    folder = os.path.basename(os.path.dirname(path) if "/subagents/" not in path
-                              else os.path.dirname(os.path.dirname(os.path.dirname(path))))
+    folder = os.path.relpath(path, claude.CLAUDE_PROJECTS).split(os.sep)[0]
     return any(_FOLD(folder) == re.sub(r"[^A-Za-z0-9]", "-", p) for p in excluded_paths)
 
 
@@ -157,7 +208,10 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
     had_content = {r[0] for r in ref.execute(
         "select session_id from sessions where agent='codex' and log_path is not null")}
     cfg = config.load()
+    keep = cfg["retention"]["keep"]
     excluded, excluded_paths = _excluder(cfg)
+    forgotten = {a: set(ids) for a, ids in json.loads(
+        (ref.execute("select value from meta where key='forgotten'").fetchone() or ["{}"])[0]).items()}
     stored = {a: {r[0] for r in con.execute("select session_id from sessions where agent=?", (a,))}
               for a in ("codex", "claude")}
     # A source the user turned off is removed from the memory; one that is missing is left alone.
@@ -178,13 +232,18 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
             if os.path.exists(os.path.join(codex.CODEX_HOME, "state_5.sqlite")):  # absent isn't a fault; health notes it
                 stats["failures"].append({"kind": "source", "path": "Codex thread table", "error": str(e)})
         on_disk = codex.scan_rollouts()  # thread id -> ordered log segments
-    skipped = {tid for tid, rec in threads.items() if excluded(rec.get("cwd"), rec.get("project"))}
+    skipped = {tid for tid, rec in threads.items()
+               if tid in forgotten.get("codex", ()) or excluded(rec.get("cwd"), rec.get("project"))}
+    skipped |= forgotten.get("codex", set()) & set(on_disk)
+    with_log = set(on_disk)
     sigs = {} if full else _stored_sigs(con, "codex")
     todo, recs, lost_logs = [], {}, []
     for tid, rec in threads.items():
         if tid in skipped:
             continue
         paths = on_disk.get(tid) or [p for p in [codex.resolve_log(rec["log_path"])] if p]
+        if paths:
+            with_log.add(tid)
         if not paths:
             if tid in had_content:
                 lost_logs.append(tid)
@@ -210,7 +269,7 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
         recs[tid] = rec
         todo.append((tid, paths))
     # Threads that exist only as log files (not in Codex's thread table).
-    log_only = [t for t in on_disk if t not in threads]
+    log_only = [t for t in on_disk if t not in threads and t not in skipped]
     for tid in log_only:
         paths = on_disk[tid]
         sig = _sig(paths)
@@ -259,8 +318,19 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
             if done % 500 == 0:
                 con.commit()
                 log(f"  codex {done}/{len(todo)}")
+    known = _known_gone(ref, "codex")
+    newly_lost = [t for t in lost_logs if t not in known]
+    if len(newly_lost) > MAX_VANISH_SHARE * max(1, len(had_content)) and not accept_removals:
+        pass  # many at once: the guard below keeps everything as it was
+    elif lost_logs:  # in Codex's thread table, but its log is gone
+        kinds = {r[0]: r[1] for r in ref.execute("select session_id, kind from sessions where agent='codex'")}
+        kept = [t for t in lost_logs if _keeps(keep, threads[t].get("kind") or kinds.get(t))]
+        lost_logs = [t for t in lost_logs if t not in kept]
+        newly_lost = [t for t in lost_logs if t not in known]
+        if not full:  # a full rebuild hands them on from the previous store (see _carry_kept)
+            _mark_kept(con, "codex", [t for t in kept if t not in known], stats)
     if lost_logs:
-        if len(lost_logs) > MAX_VANISH_SHARE * max(1, len(had_content)) and not accept_removals:
+        if len(newly_lost) > MAX_VANISH_SHARE * max(1, len(had_content)) and not accept_removals:
             stats["failures"].append({"kind": "guard", "path": "codex logs",
                                       "error": f"logs for {len(lost_logs)} of {len(had_content)} "
                                       "threads became unreadable at once; kept their content (drive unmounted?)"})
@@ -275,9 +345,11 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
             stats["codex_logs_gone"] = len(lost_logs)
     _drop(con, "codex", skipped & (stored["codex"] | parsed_ids), stats, "excluded_removed")
     if full and previous is not None:
+        _carry_kept(previous, con, "codex", keep, skipped, stats, accept_removals)
         _check_shrink(previous, con, "codex", stats, accept_removals, ignore=skipped)
     elif use_codex:
-        _reconcile(con, "codex", (set(threads) | set(on_disk)) - skipped, stats, log, accept_removals)
+        _reconcile(con, "codex", (set(threads) | set(on_disk)) - skipped, stats, log, accept_removals, keep,
+                   with_log=with_log)
     con.commit()
 
     had_goals = ref.execute("select 1 from goals limit 1").fetchone() is not None
@@ -303,7 +375,7 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
 
     # ---- Claude ----
     logs = claude.list_logs() if use_claude else []
-    cskipped = {a[1] for a in logs if _claude_dir_excluded(a[0], excluded_paths)}
+    cskipped = {a[1] for a in logs if a[1] in forgotten.get("claude", ()) or _claude_dir_excluded(a[0], excluded_paths)}
     logs = [a for a in logs if a[1] not in cskipped]
     csigs = {} if full else _stored_sigs(con, "claude")
     ctodo = []
@@ -336,9 +408,10 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
             stats["claude_parsed"] += 1
     _drop(con, "claude", cskipped & stored["claude"], stats, "excluded_removed")
     if full and previous is not None:
+        _carry_kept(previous, con, "claude", keep, cskipped, stats, accept_removals)
         _check_shrink(previous, con, "claude", stats, accept_removals, ignore=cskipped)
     elif use_claude:
-        _reconcile(con, "claude", {a[1] for a in logs} - cskipped, stats, log, accept_removals)
+        _reconcile(con, "claude", {a[1] for a in logs} - cskipped, stats, log, accept_removals, keep)
     con.commit()
 
     def load_keys(tid):
@@ -358,20 +431,23 @@ def update(con, full=False, workers=None, log=print, accept_removals=False, prev
         old = previous.execute("select value from meta where key='inventory'").fetchone()
         if old:
             con.execute("insert or replace into meta values ('inventory', ?)", (old[0],))
-    # Sessions stored before a folder or project was excluded, whatever their log's state.
+    # Sessions stored before a folder or project was excluded (or the session forgotten), whatever their log's state.
     for agent, ids in (("codex", skipped), ("claude", cskipped)):
         late = {r[0] for r in con.execute("select session_id, cwd, project from sessions where agent=?", (agent,))
-                if excluded(r[1], r[2])}
+                if r[0] in forgotten.get(agent, ()) or excluded(r[1], r[2])}
         _drop(con, agent, late, stats, "excluded_removed")
         ids |= late
     # Sessions skipped by the user's exclusions, so health doesn't report them as missing.
+    con.execute("insert or replace into meta values ('forgotten', ?)",
+                (json.dumps({a: sorted(ids) for a, ids in forgotten.items()}),))
     con.execute("insert or replace into meta values ('excluded', ?)",
                 (json.dumps({"codex": sorted(skipped), "claude": sorted(cskipped)}),))
     rebuild_links(con)
     stats["seconds"] = round(time.time() - t0, 1)
     con.execute("insert into runs (started_at, finished_at, mode, stats) values (?,?,?,?)",
                 (started, store.now_iso(), "full" if full else "incremental", json.dumps(stats)))
-    con.execute("insert or replace into meta values ('last_update', ?)", (store.now_iso(),))
+    # The start, not the end: logs written while this update ran count as changed since it, not as missed.
+    con.execute("insert or replace into meta values ('last_update', ?)", (started,))
     con.commit()
     if any(k in stats for k in ("excluded_removed", "codex_source_off_removed", "claude_source_off_removed")):
         store.purge_deleted(con)  # removed for privacy: erase the text from the file too, not just the index

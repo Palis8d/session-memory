@@ -28,8 +28,13 @@ def list_logs():
     out = []
     for f in glob.glob(os.path.join(CLAUDE_PROJECTS, "*", "*.jsonl")):
         out.append((f, os.path.basename(f)[:-6], None))
-    for f in glob.glob(os.path.join(CLAUDE_PROJECTS, "*", "*", "subagents", "*.jsonl")):
-        parent = os.path.basename(os.path.dirname(os.path.dirname(f)))
+    # Helper logs sit in <session>/subagents/, and workflow helpers one level deeper
+    # (subagents/workflows/<run>/agent-*.jsonl, beside a journal.jsonl that isn't a session).
+    for f in glob.glob(os.path.join(CLAUDE_PROJECTS, "*", "*", "subagents", "**", "*.jsonl"), recursive=True):
+        rel = os.path.relpath(f, CLAUDE_PROJECTS).split(os.sep)
+        if len(rel) > 4 and not os.path.basename(f).startswith("agent-"):
+            continue
+        parent = rel[1]
         out.append((f, f"{parent}/{os.path.basename(f)[:-6]}", parent))
     return out
 

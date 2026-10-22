@@ -319,10 +319,10 @@ def test_vanished_sources_are_removed():
             store.replace_session(con, {"agent": "claude", "session_id": sid, "kind": "top", "log_path": "p",
                                         "turns": [{"request": "hello", "answer": "hi"}], "files": {}})
         stats = {"failures": []}
-        ingest._reconcile(con, "claude", {"a", "b", "c", "d", "e"}, stats, lambda *_: None)
+        ingest._reconcile(con, "claude", {"a", "b", "c", "d", "e"}, stats, lambda *_: None, keep="none")
         assert stats.get("claude_removed") == 1
         assert con.execute("select count(*) from turns_fts where session_id='f'").fetchone()[0] == 0
-        ingest._reconcile(con, "claude", set(), stats, lambda *_: None)  # mass disappearance is refused
+        ingest._reconcile(con, "claude", set(), stats, lambda *_: None, keep="none")  # mass disappearance is refused
         assert con.execute("select count(*) from sessions").fetchone()[0] == 5
 
 

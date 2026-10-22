@@ -576,6 +576,153 @@ def test_reading_commands_handle_punctuation_names_dates_and_nothing():
         _reset_settings()
 
 
+# ---------------------------------------------------------------- keeping sessions after their logs are deleted
+
+def _history_for_retention():
+    """16 Claude Code sessions (one with a helper) and 5 Codex threads; returns the logs that get deleted."""
+    main = _claude_log("/work/r", "66666666-0000-0000-0000-000000000001", "the KEEPWORD decision")
+    helper_dir = os.path.join(os.path.dirname(main), "66666666-0000-0000-0000-000000000001", "subagents")
+    os.makedirs(helper_dir)
+    helper = os.path.join(helper_dir, "agent-a1.jsonl")
+    shutil.copy(_claude_log("/work/tmp", "66666666-0000-0000-0000-0000000000ff", "HELPERWORD research"), helper)
+    os.remove(os.path.join(os.path.dirname(main).replace("work-r", "work-tmp"), "66666666-0000-0000-0000-0000000000ff.jsonl"))
+    for i in range(2, 16):
+        _claude_log("/work/r", f"66666666-0000-0000-0000-0000000000{i:02d}", f"ordinary session {i}")
+    codex_logs = [_codex_log("/work/r", f"c0dec0de-0000-4000-8000-00000000010{i}", f"codex ask {i} CODEXWORD{i}")
+                  for i in range(5)]
+    return main, helper, codex_logs[0]
+
+
+def _kept(con):
+    return {r[0] for r in con.execute("select session_id from sessions where log_deleted_at is not null")}
+
+
+def test_deleted_logs_are_kept_as_settings_say():
+    _reset_settings()
+    try:
+        main, helper, clog = _history_for_retention()
+        main_id, helper_id = "66666666-0000-0000-0000-000000000001", "66666666-0000-0000-0000-000000000001/agent-a1"
+        cid = "c0dec0de-0000-4000-8000-000000000100"
+        saved = {p: open(p).read() for p in (main, helper, clog)}
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "memory.sqlite")
+            con = store.connect(db)
+            _update(con)
+            assert con.execute("select count(*) from sessions").fetchone()[0] == 21
+            for p in (main, helper, clog):
+                os.remove(p)
+            s = _update(con)  # default keep = all: nothing is forgotten, all three are marked
+            assert _kept(con) == {main_id, helper_id, cid} and not s["failures"], (s, _kept(con))
+            assert con.execute("select count(*) from turns_fts where turns_fts match 'keepword'").fetchone()[0] == 1
+            levels = {name: (lvl, d) for lvl, name, d in health.check_discovery(con)}
+            assert levels["claude discovery"][0] == health.GREEN and "2 kept" in levels["claude discovery"][1], levels
+            # A full rebuild reads only the logs on disk, and still hands the kept sessions on.
+            with patch.object(store, "DB_PATH", db), patch.object(ingest, "ProcessPoolExecutor", _SyncPool):
+                cli.rebuild(con, workers=1, log=QUIET)
+            assert _kept(con) == {main_id, helper_id, cid}, _kept(con)
+            assert con.execute("select count(*) from turns_fts where turns_fts match 'codexword0'").fetchone()[0] == 1
+            config.set_value("retention.keep", '"main"')  # keep main sessions, let helpers go
+            _update(con)
+            assert _kept(con) == {main_id, cid}, _kept(con)
+            config.set_value("retention.keep", '"none"')  # already known to be gone: removed without the guard
+            s = _update(con)
+            assert _kept(con) == set() and not s["failures"], s
+            assert con.execute("select count(*) from sessions").fetchone()[0] == 18
+            config.set_value("retention.keep", '"all"')
+            open(main, "w").write(saved[main])
+            _update(con)
+            os.remove(main)
+            _update(con)
+            assert _kept(con) == {main_id}
+            open(main, "w").write(saved[main])  # the log comes back: the mark goes
+            _update(con)
+            assert _kept(con) == set(), _kept(con)
+            con.close()
+    finally:
+        _clean_sources()
+        _reset_settings()
+
+
+def test_unplugged_drive_is_not_taken_for_deletion():
+    _reset_settings()
+    try:
+        _history_for_retention()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "memory.sqlite")
+            con = store.connect(db)
+            _update(con)
+            inventory = con.execute("select value from meta where key='inventory'").fetchone()[0]
+            shutil.rmtree(os.path.join(config.claude_home(), "projects"))
+            os.makedirs(os.path.join(config.claude_home(), "projects"))  # every Claude log gone at once
+            s = _update(con)
+            assert any(f["kind"] == "guard" for f in s["failures"]) and _kept(con) == set(), s
+            assert con.execute("select value from meta where key='inventory'").fetchone()[0] == inventory
+            levels = {name: lvl for lvl, name, _ in health.check_discovery(con)}
+            assert levels["claude discovery"] == health.RED, levels
+            with patch.object(store, "DB_PATH", db), patch.object(ingest, "ProcessPoolExecutor", _SyncPool):
+                try:
+                    cli.rebuild(con, workers=1, log=QUIET)
+                    raise AssertionError("a rebuild with every Claude log missing was accepted")
+                except SystemExit as e:
+                    assert "missing 16" in str(e), e
+            con.close()
+    finally:
+        _clean_sources()
+        _reset_settings()
+
+
+def test_forget_erases_for_good_and_can_be_undone():
+    _reset_settings()
+    try:
+        main, helper, _ = _history_for_retention()
+        _smem("setup", "--refresh", "manual", "--skills", "none")
+        assert "matches" in _smem("forget", "66666666", "--yes", check=False).stdout  # ambiguous: refused
+        assert _smem("forget", "6666", "--yes", check=False).returncode != 0  # too short: refused
+        preview = _smem("forget", "66666666-0000-0000-0000-000000000001", "--dry-run").stdout
+        assert "2 sessions" in preview, preview  # the session and the helper it started
+        assert _smem("forget", "66666666-0000-0000-0000-000000000001", check=False).returncode != 0  # needs --yes
+        _smem("forget", "66666666-0000-0000-0000-000000000001", "--yes")
+        raw = open(store.DB_PATH, "rb").read()
+        assert b"KEEPWORD" not in raw and b"HELPERWORD" not in raw
+        _smem("update")  # the logs still exist; forgotten sessions stay out
+        assert "No matches" in _smem("search", "KEEPWORD").stdout
+        assert os.path.exists(main) and os.path.exists(helper)  # forgetting never touches the logs
+        listed = _smem("forget", "--list").stdout
+        assert "66666666-0000-0000-0000-000000000001" in listed and "agent-a1" in listed, listed
+        assert "GREEN" in _smem("health", "--fast", check=False).stdout.splitlines()[0]
+        _smem("forget", "--undo", "66666666-0000-0000-0000-000000000001")
+        _smem("update")
+        assert "[KEEPWORD]" in _smem("search", "KEEPWORD").stdout
+        _smem("uninstall", "--yes")
+    finally:
+        _clean_sources()
+        _reset_settings()
+
+
+def test_workflow_helpers_are_found_and_new_logs_are_not_missed():
+    _reset_settings()
+    try:
+        main = _claude_log("/work/w", "77777777-0000-0000-0000-000000000001", "start a workflow")
+        run = os.path.join(os.path.dirname(main), "77777777-0000-0000-0000-000000000001", "subagents", "workflows", "wf_1")
+        os.makedirs(run)
+        shutil.copy(main, os.path.join(run, "agent-b1.jsonl"))
+        open(os.path.join(run, "journal.jsonl"), "w").write('{"type": "started"}\n')  # bookkeeping, not a session
+        ids = {sid for _, sid, _ in claude.list_logs()}
+        assert ids == {"77777777-0000-0000-0000-000000000001", "77777777-0000-0000-0000-000000000001/agent-b1"}, ids
+        with tempfile.TemporaryDirectory() as tmp:
+            con = store.connect(os.path.join(tmp, "t.sqlite"))
+            _update(con)
+            time.sleep(1.1)
+            _claude_log("/work/w", "77777777-0000-0000-0000-000000000002", "a session that started just now")
+            levels = {name: (lvl, d) for lvl, name, d in health.check_discovery(con)}
+            assert levels["claude discovery"][0] == health.GREEN, levels  # new since the update isn't "missed"
+            assert health.check_freshness(con)[0][0] == health.YELLOW  # it's reported as changed instead
+            con.close()
+    finally:
+        _clean_sources()
+        _reset_settings()
+
+
 if __name__ == "__main__":
     failed = 0
     try:

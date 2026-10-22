@@ -37,6 +37,21 @@ def _excluded(con, agent):
     return set(json.loads(raw).get(agent, []))
 
 
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0
+
+
+def _kept_note(con, agent):
+    try:
+        n = con.execute("select count(*) from sessions where agent=? and log_deleted_at is not null", (agent,)).fetchone()[0]
+    except sqlite3.OperationalError:
+        return ""
+    return f", plus {n} kept after their logs were deleted" if n else ""
+
+
 def _since(days, now=None):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((now or time.time()) - days * 86400))
 
@@ -193,15 +208,19 @@ def check_discovery(con):
     excluded are expected to be absent."""
     out = []
     prev = json.loads((con.execute("select value from meta where key='inventory'").fetchone() or ["{}"])[0])
+    prev_update = (con.execute("select value from meta where key='last_update'").fetchone() or [None])[0]
     if not in_use("codex"):
         out.append((GREEN, "codex discovery", "Codex isn't in use here (off in settings, or not installed)"))
     else:
         on_disk = codex.scan_rollouts()
         skip = _excluded(con, "codex")
         have = {r[0] for r in con.execute("select session_id from sessions where agent='codex' and log_path is not null")}
-        missing = [t for t in on_disk if t not in have and t not in skip]
+        since = _epoch(prev_update) if prev_update else None
+        missing = [t for t in on_disk if t not in have and t not in skip  # new since the update: freshness's job
+                   and not (since and _mtime(on_disk[t][-1]) >= since)]
         level = _level(len(missing) / max(1, len(on_disk)), 0.02, 0)
         detail = f"{len(on_disk) - len(missing)} of {len(on_disk)} threads with logs on disk are in memory"
+        detail += _kept_note(con, "codex")
         if skip:
             detail += f" ({len(skip)} excluded by your settings)"
         if prev.get("codex_log_threads") and len(on_disk) < 0.95 * prev["codex_log_threads"]:
@@ -232,9 +251,10 @@ def check_discovery(con):
         skip = _excluded(con, "claude")
         logs = [a for a in claude.list_logs() if a[1] not in skip]
         have = {r[0] for r in con.execute("select session_id from sessions where agent='claude'")}
-        missing = [sid for _, sid, _ in logs if sid not in have]
+        since = _epoch(prev_update) if prev_update else None
+        missing = [sid for p, sid, _ in logs if sid not in have and not (since and _mtime(p) >= since)]
         level = _level(len(missing) / max(1, len(logs)), 0.02, 0)
-        detail = f"{len(logs) - len(missing)} of {len(logs)} Claude logs are in memory"
+        detail = f"{len(logs) - len(missing)} of {len(logs)} Claude logs are in memory" + _kept_note(con, "claude")
         if skip:
             detail += f" ({len(skip)} excluded by your settings)"
         if prev.get("claude_logs") and len(logs) < 0.95 * prev["claude_logs"]:
