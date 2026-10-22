@@ -9,6 +9,7 @@ Codex and Claude Code change their log formats without notice. Each check watche
   cross-check       counts below Codex's own item index
 """
 import calendar
+import collections
 import copy
 import json
 import os
@@ -46,7 +47,8 @@ def _mtime(path):
 
 def _kept_note(con, agent):
     try:
-        n = con.execute("select count(*) from sessions where agent=? and log_deleted_at is not null", (agent,)).fetchone()[0]
+        n = con.execute("select count(*) from sessions where agent=? and log_deleted_at is not null",
+                        (agent,)).fetchone()[0]
     except sqlite3.OperationalError:
         return ""
     return f", plus {n} kept after their logs were deleted" if n else ""
@@ -359,8 +361,47 @@ def check_last_run(con):
     return [(YELLOW, "last update", f"{len(f)} problems, e.g. {f[0]['path']}: {f[0]['error']}")]
 
 
+RETENTION_BATCH = 5  # this many hand-deletion-looking logs gone in one update looks like a changed cleanup rule
+
+
+def check_retention(con, days=WINDOW_DAYS):
+    """Deleted logs: the assistants' own cleanup, deletions by hand, or a change in a cleanup rule. Codex
+    never deletes on its own and Claude Code deletes logs older than its cleanup period, so many younger
+    logs vanishing in one update suggests the rule changed (or a big cleanup by hand)."""
+    raw = (con.execute("select value from meta where key='deletions'").fetchone() or ["[]"])[0]
+    events = [e for e in json.loads(raw) if e["noticed"] >= _since(days)]
+    out = []
+    for agent, label in (("claude", "Claude Code"), ("codex", "Codex")):
+        ev = [e for e in events if e["agent"] == agent]
+        if not in_use(agent) and not ev:
+            continue
+        auto = [e for e in ev if e["how"] == "auto"]
+        by_hand = [e for e in ev if e["how"] != "auto"]
+        batch = max(collections.Counter(e.get("run", e["noticed"]) for e in by_hand).values(), default=0)
+        if agent == "claude":
+            period, set_by_user = claude.cleanup_days()
+            detail = (f"Claude Code deletes logs after {period} days ({'your' if set_by_user else 'its default'} "
+                      f"cleanupPeriodDays); in the last {days} days {len(auto)} went that way and "
+                      f"{len(by_hand)} younger ones were deleted")
+        else:
+            detail = f"Codex doesn't delete logs on its own; in the last {days} days {len(by_hand)} were deleted"
+        level = GREEN
+        if batch >= RETENTION_BATCH:
+            level = YELLOW
+            detail += (f"; {batch} went in one update, which looks like a change in {label}'s cleanup rule "
+                       "(or a big cleanup by hand)")
+        kept = con.execute("select count(*) from sessions where agent=? and log_deleted_how='deliberate'",
+                           (agent,)).fetchone()[0]
+        if kept:
+            detail += (f"; {kept} that look deleted by hand are still in the memory (retention.keep = "
+                       f"{config.load()['retention']['keep']}; `smem forget --deleted` erases them)")
+        out.append((level, f"{agent} retention", detail))
+    return out
+
+
 def run(con, crosscheck=True):
-    results = (check_freshness(con) + check_last_run(con) + check_discovery(con) + check_capture(con)
+    results = (check_freshness(con) + check_last_run(con) + check_discovery(con) + check_retention(con)
+               + check_capture(con)
                + check_extraction(con) + check_trends(con) + check_unknown(con) + check_new_tools(con)
                + check_parse_errors(con))
     if crosscheck:

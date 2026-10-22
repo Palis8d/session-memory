@@ -476,8 +476,8 @@ def cmd_forget(a):
         if not any(forgotten.values()):
             print("No sessions are forgotten.")
         return
-    if not a.ids:
-        sys.exit("Name the sessions to forget by id (`smem recent` and `smem search` show ids).")
+    if not a.ids and not a.deleted:
+        sys.exit("Name the sessions to forget by id (`smem recent` and `smem search` show ids), or use --deleted.")
     with update_lock(wait=True):
         con, outdated = writer()
         if outdated:
@@ -497,6 +497,11 @@ def cmd_forget(a):
                 con.commit()
             return
         targets = []
+        if a.deleted:  # sessions whose logs look deleted by hand but that the memory kept
+            targets = con.execute("select * from sessions where log_deleted_how='deliberate'").fetchall()
+            if not targets:
+                print("No kept sessions look deleted by hand.")
+                return
         for q in a.ids:
             rows = con.execute("select * from sessions where session_id=? or session_id like ? || '%'", (q, q)).fetchall()
             exact = [r for r in rows if r["session_id"] == q]
@@ -509,13 +514,14 @@ def cmd_forget(a):
                 for r in rows:
                     print("  " + row_line(r))
                 sys.exit(1)
-            stack = [(exact or rows)[0]]
-            while stack:  # the session, and the helper sessions it started (they hold its work)
-                r = stack.pop()
-                if (r["agent"], r["session_id"]) not in {(t["agent"], t["session_id"]) for t in targets}:
-                    targets.append(r)
-                    stack += con.execute("select * from sessions where agent=? and parent_id=? and parent_rel='helper'",
-                                         (r["agent"], r["session_id"])).fetchall()
+            targets.append((exact or rows)[0])
+        stack, targets = list(targets), []
+        while stack:  # each session, and the helper sessions it started (they hold its work)
+            r = stack.pop()
+            if (r["agent"], r["session_id"]) not in {(t["agent"], t["session_id"]) for t in targets}:
+                targets.append(r)
+                stack += con.execute("select * from sessions where agent=? and parent_id=? and parent_rel='helper'",
+                                     (r["agent"], r["session_id"])).fetchall()
         print(f"Forgetting erases {plural(len(targets), 'session')} from the memory for good "
               "(their logs, if any, aren't touched):")
         for r in targets:
@@ -1037,6 +1043,8 @@ def parser():
 
     p = cmd("forget", cmd_forget, "erase sessions (and the helpers they started) from the memory for good")
     p.add_argument("ids", nargs="*", metavar="ID", help="session ids (at least 8 characters, or the whole id)")
+    p.add_argument("--deleted", action="store_true",
+                   help="forget every kept session whose log looks deleted by hand (not by an assistant's cleanup)")
     p.add_argument("--undo", action="store_true", help="let updates read these sessions again")
     p.add_argument("--list", action="store_true", help="show the forgotten sessions")
     p.add_argument("--yes", action="store_true", help="don't ask for confirmation")
@@ -1050,9 +1058,9 @@ def parser():
     p = cmd("setup", cmd_setup, "settings, skills, refresh, first build and checks, in one step")
     p.add_argument("--refresh", choices=["auto", "manual", "off"], help="how the memory stays current (default: keep current)")
     p.add_argument("--every", type=int, metavar="MINUTES", help="how often auto refreshes (default 15)")
-    p.add_argument("--keep", choices=["all", "main", "none"],
-                   help="after an assistant deletes a session's log: keep all sessions, main ones only, or none "
-                        "(default: keep current; new installs keep all)")
+    p.add_argument("--keep", choices=["all", "auto", "main", "none"],
+                   help="after a session's log is deleted: keep all; keep only what an assistant's own cleanup "
+                        "deleted (auto); keep main sessions only; or none (default: keep current; new installs: all)")
     p.add_argument("--skills", metavar="LIST", help="claude,codex | all | none (default: keep current)")
     p.add_argument("--sources", metavar="LIST", help="whose history to read: claude,codex | all (default: keep current)")
     p.add_argument("--exclude", action="append", metavar="PATH", help="never store sessions run inside PATH (repeatable)")

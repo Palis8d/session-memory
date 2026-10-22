@@ -21,7 +21,7 @@ DEFAULTS = {
         "interval_minutes": 15,            # how often `auto` refreshes
     },
     "retention": {
-        "keep": "all",                     # after an assistant deletes a session's log: all | main | none
+        "keep": "all",                     # after an assistant deletes a session's log: all | auto | main | none
     },
     "privacy": {
         "exclude_paths": [],               # sessions whose working folder is inside these are never stored
@@ -39,9 +39,10 @@ COMMENTS = {
     "sources": "Which assistants' history to read, and where it lives. Their files are only ever read.",
     "refresh": "auto = refresh in the background every interval_minutes; manual = only when asked; "
                "off = nothing updates (search still works on what's stored).",
-    "retention": "When an assistant deletes a session's log (Claude Code does after 30 days by default): "
-                 "all = the memory keeps the session; main = keeps main sessions, forgets helpers; "
-                 "none = forgets it too. `smem forget ID` erases any one session.",
+    "retention": "When a session's log is deleted: all = the memory keeps the session; auto = keeps it only "
+                 "when the assistant's own cleanup deleted it (Claude Code: older than its cleanupPeriodDays) and "
+                 "forgets sessions you deleted yourself; main = keeps main sessions, forgets helpers; none = forgets "
+                 "it too. `smem forget ID` erases any one session; `smem forget --deleted` those you deleted.",
     "privacy": "Sessions matching these are skipped and removed from the memory.",
     "skills": "Skills teach Claude and Codex how to use the memory. `smem skills` shows where they are.",
 }
@@ -116,8 +117,8 @@ def validate(cfg):
     mode = cfg["refresh"]["mode"]
     if mode not in ("auto", "manual", "off"):
         raise SystemExit(f"Settings: refresh.mode must be auto, manual or off (it is {mode!r}).{where}")
-    if cfg["retention"]["keep"] not in ("all", "main", "none"):
-        raise SystemExit(f"Settings: retention.keep must be all, main or none (it is {cfg['retention']['keep']!r}).{where}")
+    if cfg["retention"]["keep"] not in ("all", "auto", "main", "none"):
+        raise SystemExit(f"Settings: retention.keep must be all, auto, main or none (it is {cfg['retention']['keep']!r}).{where}")
     if cfg["refresh"]["interval_minutes"] < 5:
         raise SystemExit(f"Settings: refresh.interval_minutes must be at least 5.{where}")
     for p in cfg["privacy"]["exclude_paths"]:

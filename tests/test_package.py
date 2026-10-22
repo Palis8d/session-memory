@@ -52,14 +52,16 @@ def _reset_settings():
     config.apply(config.load(reload=True))
 
 
-def _claude_log(cwd, sid, words):
+def _claude_log(cwd, sid, words, days_ago=None):
+    ts = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days_ago * 86400))
+          if days_ago is not None else "2026-10-01T10:00:00Z")
     folder = os.path.join(config.claude_home(), "projects", "".join(c if c.isalnum() else "-" for c in cwd))
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{sid}.jsonl")
     with open(path, "w") as f:
-        for rec in ({"type": "user", "cwd": cwd, "timestamp": "2026-10-01T10:00:00Z",
+        for rec in ({"type": "user", "cwd": cwd, "timestamp": ts,
                      "message": {"role": "user", "content": words}},
-                    {"type": "assistant", "cwd": cwd, "timestamp": "2026-10-01T10:00:05Z",
+                    {"type": "assistant", "cwd": cwd, "timestamp": ts,
                      "message": {"role": "assistant", "content": [{"type": "text", "text": "done: " + words}]}}):
             f.write(json.dumps(rec) + "\n")
     return path
@@ -719,6 +721,68 @@ def test_workflow_helpers_are_found_and_new_logs_are_not_missed():
             assert health.check_freshness(con)[0][0] == health.YELLOW  # it's reported as changed instead
             con.close()
     finally:
+        _clean_sources()
+        _reset_settings()
+
+
+# ---------------------------------------------------------------- whose deletion was it?
+
+def _deleted(sql_where):
+    con = store.connect_readonly(store.DB_PATH)
+    try:
+        return {r[0] for r in con.execute(f"select session_id from sessions where {sql_where}")}
+    finally:
+        con.close()
+
+
+def _health(name):
+    out = json.loads(_smem("health", "--fast", "--json", check=False).stdout)
+    return next(c for c in out["checks"] if c["check"] == name)
+
+
+def test_deletions_are_sorted_alerted_and_followed():
+    _reset_settings()
+    try:
+        recent = [_claude_log("/work/d", f"88888888-0000-0000-0000-0000000001{i:02d}", f"recent {i}", days_ago=1)
+                  for i in range(20)]
+        old = [_claude_log("/work/d", f"88888888-0000-0000-0000-0000000002{i:02d}", f"OLDWORD{i}", days_ago=60)
+               for i in range(8)]
+        young = _claude_log("/work/d", "88888888-0000-0000-0000-000000000300", "YOUNGWORD", days_ago=2)
+        codex_logs = [_codex_log("/work/d", f"c0dec0de-0000-4000-8000-00000000020{i}", f"codex {i}") for i in range(6)]
+        _smem("setup", "--refresh", "manual", "--keep", "all", "--skills", "none")
+        # Claude Code's own cleanup (8 logs older than 30 days: 28% of sessions, which isn't an alarm), one
+        # recent log deleted by hand, and one Codex log deleted by hand.
+        for path in old + [young, codex_logs[0]]:
+            os.remove(path)
+        out = _smem("update").stdout
+        assert "problem" not in out, out
+        assert len(_deleted("log_deleted_how='auto'")) == 8
+        assert _deleted("log_deleted_how='deliberate'") == {"88888888-0000-0000-0000-000000000300",
+                                                            "c0dec0de-0000-4000-8000-000000000200"}
+        claude_line = _health("claude retention")
+        assert claude_line["level"] == "GREEN" and "8 went that way and 1 younger" in claude_line["detail"], claude_line
+        assert "smem forget --deleted" in claude_line["detail"] and "its default" in claude_line["detail"]
+        # The user's own deletions can follow into the memory; the cleanup's stay.
+        _smem("forget", "--deleted", "--yes")
+        assert _deleted("log_deleted_at is not null") == {f"88888888-0000-0000-0000-0000000002{i:02d}" for i in range(8)}
+        assert "[OLDWORD3]" in _smem("search", "OLDWORD3").stdout
+        # keep = auto: deletions by hand are forgotten at once; five at a time looks like a changed rule.
+        _smem("settings", "retention.keep", "auto")
+        for path in recent[:5]:
+            os.remove(path)
+        _smem("update")
+        assert not _deleted("session_id like '88888888-0000-0000-0000-00000000010%' and log_deleted_at is not null")
+        assert len(_deleted("session_id like '88888888-0000-0000-0000-0000000001%'")) == 15
+        claude_line = _health("claude retention")
+        assert claude_line["level"] == "YELLOW" and "5 went in one update" in claude_line["detail"], claude_line
+        # Claude Code's own setting decides what counts as its cleanup.
+        open(os.path.join(config.claude_home(), "settings.json"), "w").write('{"cleanupPeriodDays": 90}')
+        assert claude.cleanup_days() == (90, True)
+        assert "90 days (your cleanupPeriodDays)" in _health("claude retention")["detail"]
+        _smem("uninstall", "--yes")
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(config.claude_home(), "settings.json"))
         _clean_sources()
         _reset_settings()
 

@@ -23,7 +23,7 @@ Tell them, in about these words, naming only the assistants you found:
 >
 > 1. OK to install it and connect your Claude Code and Codex history?
 > 2. Keep it up to date automatically every 15 minutes (fastest answers), only when needed (nothing runs in the background; I can update it first when it's behind), or never? Updating uses no AI and no tokens.
-> 3. Claude Code deletes its session logs after 30 days. When an assistant deletes a log, should the memory keep that session (recommended), keep only main sessions, or forget it too?
+> 3. Claude Code deletes its session logs after 30 days, and you can delete sessions yourself in either app. When a log is deleted, should the memory keep the session (recommended), keep only what the apps' own cleanup deleted and forget what you delete yourself, or forget it too?
 > 4. Any folders whose sessions should never be stored? (Optional.)
 
 Wait for a clear yes before going on. If they say no, stop.
@@ -44,7 +44,7 @@ Inside a sandbox that blocks writing outside the project (Codex, for example), i
 
 ## 4. Set it up
 
-Match `--refresh` to the user's answer (`auto`, `manual` or `off`) and `--keep` to theirs (`all`, `main` or `none`).
+Match `--refresh` to the user's answer (`auto`, `manual` or `off`) and `--keep` to theirs (`all`, `auto` for "only what the apps' cleanup deleted", or `none`).
 
 ```bash
 smem setup --refresh auto --keep all --skills all

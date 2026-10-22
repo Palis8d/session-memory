@@ -14,7 +14,7 @@ _DB_NAME = os.environ.get("SESSION_MEMORY_DB_NAME", "memory.sqlite")
 if os.path.basename(_DB_NAME) != _DB_NAME or _DB_NAME in ("", ".", ".."):
     raise SystemExit(f"SESSION_MEMORY_DB_NAME must be a plain file name, not {_DB_NAME!r}")
 DB_PATH = os.path.join(DATA_DIR, _DB_NAME)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 create table if not exists meta (key text primary key, value text);
@@ -66,6 +66,7 @@ create table if not exists sessions (
   unknown_types text,               -- json {type: count} not recognized by the adapter
   ingested_at text,
   log_deleted_at text,              -- when smem found the log gone; the session is kept (settings: retention.keep)
+  log_deleted_how text,             -- auto (looks like the assistant's own cleanup) | deliberate (looks deleted by hand)
   primary key (agent, session_id)
 );
 create index if not exists idx_sessions_updated on sessions(updated_at);

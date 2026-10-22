@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/Palis8d/session-memory/main/install
 - **Stays on your computer.** No network, no account, no telemetry. Your history is only read, and the memory file is readable only by your account.
 - **Secrets are removed before storing.** Common forms of passwords, keys and tokens are replaced with `[REDACTED]`, checked against 99 realistic fake secrets.
 - **Asks before it changes anything.** Installing through your assistant starts with a question to you. Setup, refresh, settings, skills and uninstall can all show what they would do first (`--dry-run`), and uninstall removes only what smem created.
-- **Tested on real use.** Built and checked against a real history of more than 6,000 sessions: the first build takes about two minutes, and later updates about two seconds. 67 automated tests run on Python 3.11 to 3.14.
+- **Tested on real use.** Built and checked against a real history of more than 6,000 sessions: the first build takes about two minutes, and later updates about two seconds. 68 automated tests run on Python 3.11 to 3.14.
 
 ## Use it
 
@@ -57,13 +57,18 @@ smem project myapp            # one project's sessions
 
 ## Keeping sessions after their logs are deleted
 
-Claude Code deletes its own session logs after 30 days by default (its `cleanupPeriodDays` setting). Codex keeps its logs until you delete them. You choose what the memory does when a log is deleted:
+A log can disappear for three reasons: the assistant's own cleanup (Claude Code deletes logs after 30 days by default, its `cleanupPeriodDays` setting; Codex never cleans up on its own), you deleting a session yourself (both apps let you), or a change in an app's cleanup rule.
 
-- **all** (the default): the memory keeps the session, so it stays searchable.
-- **main**: it keeps main sessions and forgets the helper sessions they started, for the leanest memory.
-- **none**: it forgets the session too, so the memory mirrors what's on disk.
+smem tells these apart as well as it can: a Claude Code log older than its cleanup period looks like the cleanup; a younger one, or any Codex log, looks deleted by hand. You choose what the memory does:
 
-Set it with `smem settings retention.keep all|main|none`. Keeping costs little: the memory stores only requests and answers, about a hundredth of the raw logs' size. `smem forget ID` erases any one session (and the helpers it started) for good, whatever the setting. To keep Claude Code's full original logs as well, raise `cleanupPeriodDays` in `~/.claude/settings.json`.
+- **all** (the default): keep every session, so nothing is lost by accident.
+- **auto**: keep sessions the assistants' own cleanup removed, and forget the ones you deleted yourself.
+- **main**: keep main sessions and forget the helper sessions they started, for the leanest memory.
+- **none**: forget deleted sessions too, so the memory mirrors what's on disk.
+
+Set it with `smem settings retention.keep all|auto|main|none`. Keeping costs little: the memory stores only requests and answers, about a hundredth of the raw logs' size. `smem forget ID` erases any one session (and the helpers it started) for good, and `smem forget --deleted` erases every kept session that looks deleted by hand.
+
+`smem health` reports what happened: how many logs each assistant's cleanup took, how many look deleted by hand, and a warning when many younger logs vanish in one update, which suggests an app changed its cleanup rule. To keep Claude Code's full original logs as well, raise `cleanupPeriodDays` in `~/.claude/settings.json`.
 
 ## Keeping it current, and what it costs
 
@@ -101,7 +106,7 @@ Claude Code and Codex save each session as a log file on your computer. `smem up
 
 - `smem health` checks that the memory is current, that every log on disk is in it, that counts match Codex's own index, and that the log formats haven't changed.
 - `smem health --selftest` shows the checks catching five kinds of log-format change in built-in sample logs, and staying quiet in two normal situations.
-- 67 automated tests run on Python 3.11 to 3.14.
+- 68 automated tests run on Python 3.11 to 3.14.
 
 ## Requirements and limits
 

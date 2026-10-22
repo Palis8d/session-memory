@@ -42,6 +42,20 @@ def list_logs():
 ADAPTER_VERSION = 7  # bump when parsing changes so `smem update` re-reads every Claude log
 
 
+def cleanup_days():
+    """(days, set_by_user): how long Claude Code keeps session logs, from its cleanupPeriodDays setting
+    (30 days when unset). Claude Code deletes logs whose last activity is older than this."""
+    path = os.path.join(os.path.dirname(CLAUDE_PROJECTS), "settings.json")
+    try:
+        with open(path) as f:
+            days = json.load(f).get("cleanupPeriodDays")
+        if isinstance(days, int) and not isinstance(days, bool) and days > 0:
+            return days, True
+    except (OSError, ValueError, AttributeError):
+        pass
+    return 30, False
+
+
 def log_sig(path):
     st = os.stat(path)
     return f"v{ADAPTER_VERSION}:{os.path.realpath(path)}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}"
