@@ -177,6 +177,10 @@ Updating the memory uses no AI and no tokens. It's your computer reading log fil
 - Search matches words and their endings, not meaning.
 - Some Linux systems have an unrelated memory-reporting tool also called `smem`. If yours does, the one found first on your PATH runs.
 
+## Support
+
+smem is free. If it helps you, you can [support its upkeep](https://github.com/sponsors/Palis8d).
+
 ## License
 
 MIT
