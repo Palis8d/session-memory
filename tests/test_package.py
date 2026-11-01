@@ -52,9 +52,9 @@ def _reset_settings():
     config.apply(config.load(reload=True))
 
 
-def _claude_log(cwd, sid, words, days_ago=None):
-    ts = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days_ago * 86400))
-          if days_ago is not None else "2026-10-01T10:00:00Z")
+def _claude_log(cwd, sid, words, days_ago=21):
+    # Relative to today: a fixed date would drift past Claude Code's cleanup period and change what the tests prove.
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days_ago * 86400))
     folder = os.path.join(config.claude_home(), "projects", "".join(c if c.isalnum() else "-" for c in cwd))
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{sid}.jsonl")
